@@ -6,11 +6,11 @@ module.exports = function (app) {
 
   plugin.id = 'signal-k-tack-and-gybe';
   plugin.name = 'Tack and Gybe Performance Analyzer';
-  plugin.description = 'ORC-aligned performance analyzer tracking advanced STW and VMG metrics.';
+  plugin.description = 'ORC-aligned performance analyzer tracking advanced STW, VMG, and AWA metrics.';
 
   plugin.start = function (startOptions, restartPlugin) {
     options = startOptions || {};
-    app.debug('MAT 12.20 Performance Engine Active with VMG tracking.');
+    app.debug('MAT 12.20 Performance Engine Active with VMG & AWA tracking.');
     
     let targetSTW = options.targetSpeedKnots || 8.54;
     startSimulator(targetSTW);
@@ -88,11 +88,8 @@ module.exports = function (app) {
     let twaDeg = currentTWA * 180 / Math.PI;
     let awaDeg = currentAWA * 180 / Math.PI;
     
-    // Live VMG calculation: VMG = STW * cos(TWA)
     let liveVmgMS = currentSTW * Math.cos(currentTWA);
     let vmgKnots = liveVmgMS * 1.94384;
-
-    // Target VMG based on your entry target at the target angle
     let targetVmgKnots = targetEntrySTW * Math.cos(65 * Math.PI / 180);
 
     if (currentState === 'Straight') {
@@ -123,7 +120,6 @@ module.exports = function (app) {
       if (vmgKnots < minVMG) minVMG = vmgKnots;
       if (vmgKnots > maxVMG) maxVMG = vmgKnots;
 
-      // Distance Integration (Total Track vs Windward/Leeward Track)
       actualDistanceMeters += (currentSTW * 0.1);
       theoreticalDistanceMeters += ((targetEntrySTW / 1.94384) * 0.1); 
       
@@ -143,16 +139,19 @@ module.exports = function (app) {
       emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
       emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
       emitDelta('performance.maneuver.metersLost', Number(metersLost.toFixed(1)));
-      
-      // NEW: VMG Specific Performance Outputs
       emitDelta('performance.maneuver.vmgMetersLost', Number(vmgMetersLost.toFixed(1)));
-      emitDelta('performance.maneuver.minVmgKnots', Number(minVMG.toFixed(2)));
-      emitDelta('performance.maneuver.maxVmgKnots', Number(maxVMG.toFixed(2)));
+      emitDelta('performance.maneuver.minStwKnots', Number(minSTW.toFixed(2)));
+      
+      // NEW: Broadcast live AWA during active maneuver tracking
+      emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
     } else {
       emitDelta('performance.maneuver.type', 'Straight');
       emitDelta('performance.maneuver.state', 'Ready');
       emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
       emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
+      
+      // NEW: Broadcast live AWA during default state
+      emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
     }
   }
 
