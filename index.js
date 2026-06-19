@@ -6,20 +6,13 @@ module.exports = function (app) {
 
   plugin.id = 'signal-k-tack-and-gybe';
   plugin.name = 'Tack and Gybe Performance Analyzer';
-  plugin.description = 'ORC-aligned performance analyzer for MAT 12.20 reaching dynamics.';
+  plugin.description = 'ORC-aligned performance analyzer tracking advanced STW and VMG metrics.';
 
   plugin.start = function (startOptions, restartPlugin) {
     options = startOptions || {};
-    app.debug('MAT 12.20 Performance Engine Active with user configurations.');
+    app.debug('MAT 12.20 Performance Engine Active with VMG tracking.');
     
-    // Read user configuration or fall back to defaults
     let targetSTW = options.targetSpeedKnots || 8.54;
-    app.debug(`Using target entry speed benchmark: ${targetSTW} knots`);
-
-    if (options.orcUrl) {
-      app.debug(`Configured ORC Certificate Source: ${options.orcUrl}`);
-    }
-
     startSimulator(targetSTW);
   };
 
@@ -34,13 +27,17 @@ module.exports = function (app) {
   let startTime = 0;
   
   let entrySTW = 0;
+  let entryVMG = 0;
   let minSTW = 99;
   let maxSTW = 0;
-  let minWMG = 99; 
-  let maxWMG = 0;
+  let minVMG = 99; 
+  let maxVMG = 0;
 
+  // Precision tracking distance integrators
   let actualDistanceMeters = 0;
   let theoreticalDistanceMeters = 0;
+  let actualVmgDistanceMeters = 0;
+  let theoreticalVmgDistanceMeters = 0;
 
   let simStep = 0;
   let isManeuvering = false;
@@ -90,7 +87,13 @@ module.exports = function (app) {
     let stwKnots = currentSTW * 1.94384;
     let twaDeg = currentTWA * 180 / Math.PI;
     let awaDeg = currentAWA * 180 / Math.PI;
-    let wmgKnots = (currentSTW * Math.cos(currentTWA)) * 1.94384;
+    
+    // Live VMG calculation: VMG = STW * cos(TWA)
+    let liveVmgMS = currentSTW * Math.cos(currentTWA);
+    let vmgKnots = liveVmgMS * 1.94384;
+
+    // Target VMG based on your entry target at the target angle
+    let targetVmgKnots = targetEntrySTW * Math.cos(65 * Math.PI / 180);
 
     if (currentState === 'Straight') {
       if (Math.abs(twaDeg) < 25 && isManeuvering) {
@@ -99,13 +102,16 @@ module.exports = function (app) {
         startTime = Date.now();
         
         entrySTW = stwKnots;
+        entryVMG = vmgKnots;
         minSTW = stwKnots;
         maxSTW = stwKnots;
-        minWMG = wmgKnots;
-        maxWMG = wmgKnots;
+        minVMG = vmgKnots;
+        maxVMG = vmgKnots;
         
         actualDistanceMeters = 0;
         theoreticalDistanceMeters = 0;
+        actualVmgDistanceMeters = 0;
+        theoreticalVmgDistanceMeters = 0;
       }
     }
 
@@ -114,12 +120,18 @@ module.exports = function (app) {
 
       if (stwKnots < minSTW) minSTW = stwKnots;
       if (stwKnots > maxSTW) maxSTW = stwKnots;
-      if (wmgKnots < minWMG) minWMG = wmgKnots;
-      if (wmgKnots > maxWMG) maxWMG = wmgKnots;
+      if (vmgKnots < minVMG) minVMG = vmgKnots;
+      if (vmgKnots > maxVMG) maxVMG = vmgKnots;
 
+      // Distance Integration (Total Track vs Windward/Leeward Track)
       actualDistanceMeters += (currentSTW * 0.1);
       theoreticalDistanceMeters += ((targetEntrySTW / 1.94384) * 0.1); 
+      
+      actualVmgDistanceMeters += (liveVmgMS * 0.1);
+      theoreticalVmgDistanceMeters += ((targetVmgKnots / 1.94384) * 0.1);
+
       let metersLost = theoreticalDistanceMeters - actualDistanceMeters;
+      let vmgMetersLost = theoreticalVmgDistanceMeters - actualVmgDistanceMeters;
 
       if (currentState === 'InTurn' && Math.abs(twaDeg) > 45) {
         currentState = 'Recovery';
@@ -129,12 +141,18 @@ module.exports = function (app) {
       emitDelta('performance.maneuver.state', currentState);
       emitDelta('performance.maneuver.timeElapsed', Number(timeElapsedSec.toFixed(1)));
       emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
+      emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
       emitDelta('performance.maneuver.metersLost', Number(metersLost.toFixed(1)));
-      emitDelta('performance.maneuver.minStwKnots', Number(minSTW.toFixed(2)));
+      
+      // NEW: VMG Specific Performance Outputs
+      emitDelta('performance.maneuver.vmgMetersLost', Number(vmgMetersLost.toFixed(1)));
+      emitDelta('performance.maneuver.minVmgKnots', Number(minVMG.toFixed(2)));
+      emitDelta('performance.maneuver.maxVmgKnots', Number(maxVMG.toFixed(2)));
     } else {
       emitDelta('performance.maneuver.type', 'Straight');
       emitDelta('performance.maneuver.state', 'Ready');
       emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
+      emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
     }
   }
 
@@ -149,20 +167,17 @@ module.exports = function (app) {
     app.debug('Plugin stopped');
   };
 
-  // --- AUTOMATED CONFIGURATION UI SCHEMA ---
   plugin.schema = {
     type: 'object',
     title: 'MAT 12.20 Performance Settings',
     properties: {
       orcUrl: {
         type: 'string',
-        title: 'ORC Certificate Link',
-        description: 'Format: Must be a direct URL to your public ORC PDF/data file (e.g., https://data.orc.org/public/WPub.dll/CC/03200002P4H)'
+        title: 'ORC Certificate Link'
       },
       targetSpeedKnots: {
         type: 'number',
         title: 'Manual Target Entry Speed (Knots)',
-        description: 'Set your target benchmark speed based on your ORC Polar Diagram for your matching TWS / TWA condition (e.g., 8.54 knots for 12kts wind @ 75°). Used to optimize precision calculation of meters lost.',
         default: 8.54
       }
     }
