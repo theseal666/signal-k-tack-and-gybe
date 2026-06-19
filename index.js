@@ -1,28 +1,5 @@
 module.exports = function (app) {
   const plugin = {};
-
-  plugin.id = 'signal-k-tack-and-gybe';
-  plugin.name = 'Tack and Gybe Performance Analyzer';
-  plugin.description = 'Analyzes tacks and gybes using high-frequency H5000 data.';
-
-  plugin.start = function (options, restartPlugin) {
-    app.debug('Plugin started');
-  };
-
-  plugin.stop = function () {
-    app.debug('Plugin stopped');
-  };
-
-  plugin.schema = {
-    type: 'object',
-    properties: {}
-  };
-
-  return plugin;
-};
-
-module.exports = function (app) {
-  const plugin = {};
   let unsubscribes = [];
 
   plugin.id = 'signal-k-tack-and-gybe';
@@ -76,7 +53,7 @@ module.exports = function (app) {
     else if (path === 'environment.wind.angleTrueApparent') {
       currentTWA = value; // in radians (-PI to +PI)
       
-      // Let's print the values to the server logs to prove it's working
+      // Print the values to the server logs to prove it's working
       let twaDegrees = (value * 180 / Math.PI).toFixed(1);
       let stwKnots = (currentSTW * 1.94384).toFixed(2);
       
