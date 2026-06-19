@@ -10,9 +10,9 @@ module.exports = function (app) {
 
   plugin.start = function (startOptions, restartPlugin) {
     options = startOptions || {};
-    app.debug('MAT 12.20 Performance Engine Active with Fixed Physics.');
+    app.debug('MAT 12.20 Performance Engine Active with Seamless Simulation Physics.');
     
-    let targetSTW = options.targetSpeedKnots || 7.80; // Adjusted standard target for tight upwind target
+    let targetSTW = options.targetSpeedKnots || 7.80; 
     let thresholdPercent = options.recoveryThreshold || 95;
     let recoveryMultiplier = thresholdPercent / 100;
 
@@ -20,9 +20,9 @@ module.exports = function (app) {
   };
 
   // --- Live Sensor Telemetry Cache ---
-  let currentSTW = 4.01;  // ~7.8 knots base
+  let currentSTW = 4.01;   // Base speed in m/s (~7.8 knots)
   let currentTWA = -0.698; // -40 degrees upwind (Port Tack Entry)
-  let currentAWA = -0.488; // ~ -28 degrees Apparent
+  let currentAWA = -0.488; // ~ -28 degrees Apparent Wind Angle
 
   // --- Tracking State Machine ---
   let currentState = 'Straight'; 
@@ -35,6 +35,7 @@ module.exports = function (app) {
   let minVMG = 99; 
   let maxVMG = 0;
 
+  // Tracking Integrators
   let actualDistanceMeters = 0;
   let theoreticalDistanceMeters = 0;
   let actualVmgDistanceMeters = 0;
@@ -47,7 +48,7 @@ module.exports = function (app) {
     if (simInterval) clearInterval(simInterval);
     
     simInterval = setInterval(() => {
-      // Trigger a tack every 35 seconds automatically
+      // Fire an analytical test tack roughly every 35-40 seconds
       if (!isManeuvering && Math.random() < 0.005) {
         isManeuvering = true;
         simStep = 0;
@@ -56,37 +57,40 @@ module.exports = function (app) {
       if (isManeuvering) {
         simStep++;
         
-        // Phase 1: The Turn (6 seconds / 60 steps)
-        if (simStep <= 60) {
-          let progress = simStep / 60;
-          // Smoothly sweep True Wind Angle from -40° (Port) to +40° (Starboard)
-          let twaDeg = -40 + (80 * progress);
-          currentTWA = twaDeg * Math.PI / 180;
-          currentAWA = (twaDeg * 0.7) * Math.PI / 180; // AWA tightly follows TWA ahead of hull
-
-          // Smooth parabolic speed drop: Speed bottoms out perfectly at step 35 (Head to wind)
-          let dropFactor = Math.pow((simStep - 35) / 35, 2);
-          if (simStep > 35) dropFactor = Math.pow((simStep - 35) / 25, 2); // Smooth asymmetry 
+        // PHASE 1: Nosing into the wind & losing speed (Steps 1-35 / Head-to-wind apex)
+        if (simStep <= 35) {
+          let progress = simStep / 35;
           
-          let knots = (targetEntrySTW * 0.50) + ((targetEntrySTW * 0.50) * dropFactor);
+          // Sweep TWA smoothly from -40° (Port) up to 0° (Head to wind)
+          let twaDeg = -40 + (40 * progress);
+          currentTWA = twaDeg * Math.PI / 180;
+          currentAWA = (twaDeg * 0.7) * Math.PI / 180;
+
+          // Parabolic deceleration down to exactly 50% of target speed at the apex
+          let speedFactor = 1.0 - (0.50 * Math.sin(progress * Math.PI / 2));
+          let knots = targetEntrySTW * speedFactor;
           currentSTW = knots / 1.94384;
         } 
-        // Phase 2: Post-Tack Acceleration Curve (16 seconds / 160 steps)
+        // PHASE 2: Bearing away & accelerating on the new tack (Steps 36-220)
         else if (simStep <= 220) {
-          // Settled on new Starboard Upwind angle (+40° TWA)
-          currentTWA = 40 * Math.PI / 180;
-          currentAWA = 28 * Math.PI / 180;
+          let accelProgress = (simStep - 35) / (220 - 35); 
           
-          let accelProgress = (simStep - 60) / 160;
-          // Logarithmic acceleration profile up from the apex minimum
-          let knots = (targetEntrySTW * 0.50) + ((targetEntrySTW * 0.50) * Math.sqrt(accelProgress));
+          // Bear away to the new Starboard Upwind angle (+40° TWA) quickly over the first few seconds
+          let angleProgress = Math.min(1, (simStep - 35) / 25); 
+          let twaDeg = 40 * angleProgress;
+          currentTWA = twaDeg * Math.PI / 180;
+          currentAWA = (twaDeg * 0.7) * Math.PI / 180;
+          
+          // Logarithmic acceleration profile scaling smoothly from 50% up to 100% target speed
+          let speedFactor = 0.50 + (0.50 * Math.sqrt(accelProgress));
+          let knots = targetEntrySTW * speedFactor;
           currentSTW = knots / 1.94384;
         } 
         else {
           isManeuvering = false;
         }
       } else { 
-        // Baseline Sailing: Clean Port Tack Upwind (TWA: -40°, AWA: -28°)
+        // Baseline State: Static Port Tack Upwind (TWA: -40°, AWA: -28°)
         currentTWA = -40 * Math.PI / 180;
         currentAWA = -28 * Math.PI / 180;
         currentSTW = targetEntrySTW / 1.94384; 
@@ -101,11 +105,11 @@ module.exports = function (app) {
     let twaDeg = currentTWA * 180 / Math.PI;
     let awaDeg = currentAWA * 180 / Math.PI;
     
-    // Core VMG formula relative to wind direction: VMG = STW * cos(TWA)
+    // VMG Equation: VMG = STW * cos(TWA)
     let liveVmgMS = currentSTW * Math.cos(currentTWA);
     let vmgKnots = liveVmgMS * 1.94384;
     
-    // Expected Target VMG based on your entry target criteria
+    // Baseline reference Upwind VMG
     let targetVmgKnots = targetEntrySTW * Math.cos(40 * Math.PI / 180);
 
     if (currentState === 'Straight') {
@@ -144,7 +148,7 @@ module.exports = function (app) {
       let metersLost = theoreticalDistanceMeters - actualDistanceMeters;
       let vmgMetersLost = theoreticalVmgDistanceMeters - actualVmgDistanceMeters;
 
-      // Transition turn phase to recovery phase once boat swings through past 25 degrees on new tack
+      // Transition to recovery status once past 25 degrees on the new board
       if (currentState === 'InTurn' && twaDeg > 25) {
         currentState = 'Recovery';
       }
