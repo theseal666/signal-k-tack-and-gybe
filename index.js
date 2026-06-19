@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios'); // Ensure axios is available for network lookups
 
 module.exports = function (app) {
   const plugin = {};
@@ -41,7 +40,7 @@ module.exports = function (app) {
   let currentTWA = -0.698; 
   let currentAWA = -0.488; 
   let currentRudder = 0.0; 
-  let currentTWS = 6.17;   // Default 12 knots true wind speed for polar resolution
+  let currentTWS = 6.17;   
 
   // Resolved dynamic targets from ORC
   let orcTargetSTW = 7.80; 
@@ -99,7 +98,7 @@ module.exports = function (app) {
             if (kv.path === 'steering.rudderAngle') currentRudder = kv.value;
             if (kv.path === 'environment.wind.speedTrue') {
               currentTWS = kv.value;
-              resolveLivePolarTargets(); // Re-evaluate targets as the wind fluctuates
+              resolveLivePolarTargets(); 
             }
           });
         });
@@ -112,10 +111,18 @@ module.exports = function (app) {
   async function fetchOrcPolarTargets(url) {
     try {
       app.debug(`Querying ORC database for certificate profiles: ${url}`);
-      const response = await axios.get(url, { timeout: 5000 });
-      if (response.data && response.data.rms) {
-        // Cache ORC polar data structures into local memory options
-        options.polarData = response.data.rms;
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      
+      if (data && data.rms) {
+        options.polarData = data.rms;
         resolveLivePolarTargets();
         app.debug('ORC polar data curves populated successfully.');
       }
@@ -130,12 +137,9 @@ module.exports = function (app) {
     
     let twsKnots = currentTWS * 1.94384;
     
-    // ORC optimization arrays: Resolving optimal upwind target angle speeds 
-    // Parses certificate data records mapping target speed variables across current TWS increments
     try {
       let vpp = options.polarData;
       if (vpp.vmgUpwind && Array.isArray(vpp.vmgUpwind)) {
-        // Basic linear interpolation across the standard ORC wind speeds matrix [6, 8, 10, 12, 14, 16, 20]
         let target = vpp.vmgUpwind.find(item => twsKnots <= item.tws);
         if (target) {
           orcTargetSTW = target.vboat || options.targetSpeedKnots;
@@ -169,7 +173,6 @@ module.exports = function (app) {
     if (simInterval) clearInterval(simInterval);
     
     simInterval = setInterval(() => {
-      // Simulator Fallback Loop: Fires if live instrumentation feeds are idle
       if (unsubscribes.length === 0) {
         executeSimulationPhysics();
       }
