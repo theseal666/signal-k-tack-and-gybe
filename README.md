@@ -1,6 +1,6 @@
 # Signal K Tack and Gybe Performance Analyzer
 
-An advanced performance logging and maneuver analytics plugin designed for Signal K. This plugin uses high-frequency NMEA / H5000 telemetry data to detect, measure, and analyze the efficiency of tacks and gybes. Optimized with reference to high-performance racing platforms like the MAT 12.20.
+An advanced performance logging and maneuver analytics plugin designed for Signal K. This plugin uses high-frequency NMEA / H5000 telemetry data to detect, measure, and analyze the efficiency of tacks and gybes. Optimized with reference to high-performance racing platforms.
 
 ## Features
 
