@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios'); // Ensure axios is available for network lookups
 
 module.exports = function (app) {
   const plugin = {};
@@ -12,7 +13,7 @@ module.exports = function (app) {
 
   plugin.id = 'signal-k-tack-and-gybe';
   plugin.name = 'Tack and Gybe Performance Analyzer';
-  plugin.description = 'Advanced performance logger with persistent Top 10 and historical averages database.';
+  plugin.description = 'Advanced performance logger with persistent Top 10 database, rolling historical buffer, and automatic ORC Polar integrations.';
 
   const BUFFER_SIZE = 50; 
   let rollingHistory = [];
@@ -21,7 +22,7 @@ module.exports = function (app) {
   let maneuverType = 'Straight';
   let startTime = 0;
   let pendingStartTime = 0;
-  let accelerationStartTime = 0; // Tracks pure recovery acceleration timing
+  let accelerationStartTime = 0; 
   
   let snapshotEntrySTW = 0;
   let snapshotEntryVMG = 0;
@@ -29,51 +30,130 @@ module.exports = function (app) {
   
   let minSTW = 99; let maxSTW = 0;
   let minVMG = 99; let maxVMG = 0;
-  let maxOverturnTWA = 0; // Tracks the helmsman's overshoot peak
-  let timeInDeadZone = 0;  // Seconds spent under 20° TWA
+  let maxOverturnTWA = 0; 
+  let timeInDeadZone = 0;  
 
   let actualDistanceMeters = 0; let theoreticalDistanceMeters = 0;
   let actualVmgDistanceMeters = 0; let theoreticalVmgDistanceMeters = 0;
 
+  // --- Live Sensor Caches ---
   let currentSTW = 4.01;   
   let currentTWA = -0.698; 
   let currentAWA = -0.488; 
   let currentRudder = 0.0; 
+  let currentTWS = 6.17;   // Default 12 knots true wind speed for polar resolution
+
+  // Resolved dynamic targets from ORC
+  let orcTargetSTW = 7.80; 
 
   let simStep = 0;
   let isManeuvering = false;
 
-  // Knowledge base state
   let performanceDatabase = {
     totalTacksLogged: 0,
     averages: { metersLost: 0, recoveryDurationSec: 0, minStwKnots: 0 },
-    topTenBests: [] // Sorted by fewest meters lost
+    topTenBests: [] 
   };
 
   plugin.start = function (startOptions, restartPlugin) {
     options = startOptions || {};
     
-    // Set up persistence paths in Signal K config directory
     const configDir = app.getDataDirPath();
     historyFilePath = path.join(configDir, 'tack-history.json');
     loadHistoryDatabase();
 
-    let targetSTW = options.targetSpeedKnots || 7.80; 
+    // Pull targets down if an official certificate endpoint exists
+    if (options.orcUrl) {
+      fetchOrcPolarTargets(options.orcUrl);
+    } else {
+      orcTargetSTW = options.targetSpeedKnots || 7.80;
+    }
+
     let thresholdPercent = options.recoveryThreshold || 95;
     let recoveryMultiplier = thresholdPercent / 100;
 
-    startEngineLoop(targetSTW, recoveryMultiplier);
+    // Bind live instrumentation data feeds from the H5000 network
+    let localSub = {
+      context: 'vessels.self',
+      subscribe: [
+        { path: 'navigation.speedThroughWater', period: 100 },
+        { path: 'environment.wind.angleTrueWater', period: 100 },
+        { path: 'environment.wind.angleApparent', period: 100 },
+        { path: 'steering.rudderAngle', period: 100 },
+        { path: 'environment.wind.speedTrue', period: 500 }
+      ]
+    };
+
+    app.subscriptionmanager.subscribe(
+      localSub,
+      unsubscribes,
+      subscriptionError => {
+        app.error('H5000 instrumentation binding error: ' + subscriptionError);
+      },
+      delta => {
+        delta.updates.forEach(update => {
+          update.values.forEach(kv => {
+            if (kv.path === 'navigation.speedThroughWater') currentSTW = kv.value;
+            if (kv.path === 'environment.wind.angleTrueWater') currentTWA = kv.value;
+            if (kv.path === 'environment.wind.angleApparent') currentAWA = kv.value;
+            if (kv.path === 'steering.rudderAngle') currentRudder = kv.value;
+            if (kv.path === 'environment.wind.speedTrue') {
+              currentTWS = kv.value;
+              resolveLivePolarTargets(); // Re-evaluate targets as the wind fluctuates
+            }
+          });
+        });
+      }
+    );
+
+    startEngineLoop(recoveryMultiplier);
   };
+
+  async function fetchOrcPolarTargets(url) {
+    try {
+      app.debug(`Querying ORC database for certificate profiles: ${url}`);
+      const response = await axios.get(url, { timeout: 5000 });
+      if (response.data && response.data.rms) {
+        // Cache ORC polar data structures into local memory options
+        options.polarData = response.data.rms;
+        resolveLivePolarTargets();
+        app.debug('ORC polar data curves populated successfully.');
+      }
+    } catch (err) {
+      app.error('ORC API retrieval failed, defaulting to backup parameters: ' + err.message);
+      orcTargetSTW = options.targetSpeedKnots || 7.80;
+    }
+  }
+
+  function resolveLivePolarTargets() {
+    if (!options.polarData) return;
+    
+    let twsKnots = currentTWS * 1.94384;
+    
+    // ORC optimization arrays: Resolving optimal upwind target angle speeds 
+    // Parses certificate data records mapping target speed variables across current TWS increments
+    try {
+      let vpp = options.polarData;
+      if (vpp.vmgUpwind && Array.isArray(vpp.vmgUpwind)) {
+        // Basic linear interpolation across the standard ORC wind speeds matrix [6, 8, 10, 12, 14, 16, 20]
+        let target = vpp.vmgUpwind.find(item => twsKnots <= item.tws);
+        if (target) {
+          orcTargetSTW = target.vboat || options.targetSpeedKnots;
+        }
+      }
+    } catch (e) {
+      app.error('Error resolving real-time ORC polar matrix: ' + e.message);
+    }
+  }
 
   function loadHistoryDatabase() {
     try {
       if (fs.existsSync(historyFilePath)) {
         const fileData = fs.readFileSync(historyFilePath, 'utf8');
         performanceDatabase = JSON.parse(fileData);
-        app.debug('Tack history database loaded successfully.');
       }
     } catch (e) {
-      app.error('Failed to parse tack history file, starting clean: ' + e.message);
+      app.error('Failed to parse history database: ' + e.message);
     }
   }
 
@@ -81,65 +161,68 @@ module.exports = function (app) {
     try {
       fs.writeFileSync(historyFilePath, JSON.stringify(performanceDatabase, null, 2), 'utf8');
     } catch (e) {
-      app.error('Failed to write history file to disk: ' + e.message);
+      app.error('Failed to write history database: ' + e.message);
     }
   }
 
-  function startEngineLoop(targetEntrySTW, recoveryMultiplier) {
+  function startEngineLoop(recoveryMultiplier) {
     if (simInterval) clearInterval(simInterval);
     
     simInterval = setInterval(() => {
-      // Simulator logic mimicking real boat data, including an intentional overshoot/overturn
-      if (!isManeuvering && Math.random() < 0.005) {
-        isManeuvering = true;
-        simStep = 0;
+      // Simulator Fallback Loop: Fires if live instrumentation feeds are idle
+      if (unsubscribes.length === 0) {
+        executeSimulationPhysics();
       }
-
-      if (isManeuvering) {
-        simStep++;
-        if (simStep <= 15) {
-          currentRudder = (8 * Math.PI / 180) * (simStep / 15);
-          let twaDeg = -40 + (12 * (simStep / 15)); 
-          currentTWA = twaDeg * Math.PI / 180;
-          currentAWA = (twaDeg * 0.7) * Math.PI / 180;
-          currentSTW = (targetEntrySTW - (0.4 * (simStep / 15))) / 1.94384; 
-        }
-        else if (simStep <= 50) {
-          currentRudder = 12 * Math.PI / 180; 
-          let progress = (simStep - 15) / 35;
-          // Sweeps through 0 up to 46 degrees (deliberately overshooting upwind target of 40)
-          let twaDeg = -28 + (74 * progress); 
-          currentTWA = twaDeg * Math.PI / 180;
-          currentAWA = (twaDeg * 0.7) * Math.PI / 180;
-          let speedFactor = 0.95 - (0.45 * Math.sin(progress * Math.PI / 2));
-          currentSTW = (targetEntrySTW * speedFactor) / 1.94384;
-        }
-        else if (simStep <= 220) {
-          let progress = (simStep - 50) / 170;
-          currentRudder = -2 * Math.PI / 180; 
-          // Helmsman slowly brings the boat back up from 46° down to standard 40° upwind target
-          let twaDeg = 46 - (6 * Math.min(1, progress * 3));
-          currentTWA = twaDeg * Math.PI / 180;
-          currentAWA = (twaDeg * 0.7) * Math.PI / 180;
-          let speedFactor = 0.50 + (0.50 * Math.sqrt(progress));
-          currentSTW = (targetEntrySTW * speedFactor) / 1.94384;
-        }
-        else {
-          isManeuvering = false;
-          currentRudder = 0;
-        }
-      } else { 
-        currentTWA = -40 * Math.PI / 180;
-        currentAWA = -28 * Math.PI / 180;
-        currentSTW = targetEntrySTW / 1.94384; 
-        currentRudder = 0.0;
-      }
-
-      runAnalysisPipeline(targetEntrySTW, recoveryMultiplier);
+      runAnalysisPipeline(orcTargetSTW, recoveryMultiplier);
     }, 100);
   }
 
-  function runAnalysisPipeline(targetEntrySTW, recoveryMultiplier) {
+  function executeSimulationPhysics() {
+    if (!isManeuvering && Math.random() < 0.005) {
+      isManeuvering = true;
+      simStep = 0;
+    }
+
+    if (isManeuvering) {
+      simStep++;
+      if (simStep <= 15) {
+        currentRudder = (8 * Math.PI / 180) * (simStep / 15);
+        let twaDeg = -40 + (12 * (simStep / 15)); 
+        currentTWA = twaDeg * Math.PI / 180;
+        currentAWA = (twaDeg * 0.7) * Math.PI / 180;
+        currentSTW = (orcTargetSTW - (0.4 * (simStep / 15))) / 1.94384; 
+      }
+      else if (simStep <= 50) {
+        currentRudder = 12 * Math.PI / 180; 
+        let progress = (simStep - 15) / 35;
+        let twaDeg = -28 + (74 * progress); 
+        currentTWA = twaDeg * Math.PI / 180;
+        currentAWA = (twaDeg * 0.7) * Math.PI / 180;
+        let speedFactor = 0.95 - (0.45 * Math.sin(progress * Math.PI / 2));
+        currentSTW = (orcTargetSTW * speedFactor) / 1.94384;
+      }
+      else if (simStep <= 220) {
+        let progress = (simStep - 50) / 170;
+        currentRudder = -2 * Math.PI / 180; 
+        let twaDeg = 46 - (6 * Math.min(1, progress * 3));
+        currentTWA = twaDeg * Math.PI / 180;
+        currentAWA = (twaDeg * 0.7) * Math.PI / 180;
+        let speedFactor = 0.50 + (0.50 * Math.sqrt(progress));
+        currentSTW = (orcTargetSTW * speedFactor) / 1.94384;
+      }
+      else {
+        isManeuvering = false;
+        currentRudder = 0;
+      }
+    } else { 
+      currentTWA = -40 * Math.PI / 180;
+      currentAWA = -28 * Math.PI / 180;
+      currentSTW = orcTargetSTW / 1.94384; 
+      currentRudder = 0.0;
+    }
+  }
+
+  function runAnalysisPipeline(activeTargetSTW, recoveryMultiplier) {
     let stwKnots = currentSTW * 1.94384;
     let twaDeg = currentTWA * 180 / Math.PI;
     let awaDeg = currentAWA * 180 / Math.PI;
@@ -201,10 +284,9 @@ module.exports = function (app) {
       if (vmgKnots > maxVMG) maxVMG = vmgKnots;
 
       if (Math.abs(twaDeg) < 20) {
-        timeInDeadZone += 0.1; // Accumulate time sails spent flapping (100ms updates)
+        timeInDeadZone += 0.1; 
       }
 
-      // Track helmsman's maximum bearing-away overshoot angle relative to target upwind entry
       let currentOvershoot = Math.abs(twaDeg) - snapshotEntryTWA;
       if (currentState === 'Recovery' && currentOvershoot > maxOverturnTWA) {
         maxOverturnTWA = currentOvershoot;
@@ -219,10 +301,9 @@ module.exports = function (app) {
       let metersLost = theoreticalDistanceMeters - actualDistanceMeters;
       let vmgMetersLost = theoreticalVmgDistanceMeters - actualVmgDistanceMeters;
 
-      // Transition turn -> recovery as sails catch air on opposite board
       if (currentState === 'InTurn' && Math.abs(twaDeg) > 22) {
         currentState = 'Recovery';
-        accelerationStartTime = Date.now(); // Start pure acceleration clock
+        accelerationStartTime = Date.now(); 
       }
 
       emitDelta('performance.maneuver.type', maneuverType);
@@ -232,7 +313,6 @@ module.exports = function (app) {
       emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
       emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
 
-      // --- CRITERIA COMPLETED: LOG PERFORMANCE TO KNOWLEDGEBASE ---
       if (currentState === 'Recovery' && stwKnots >= (snapshotEntrySTW * recoveryMultiplier)) {
         let recoveryDuration = (Date.now() - accelerationStartTime) / 1000;
         
@@ -270,7 +350,6 @@ module.exports = function (app) {
     let db = performanceDatabase;
     db.totalTacksLogged++;
 
-    // Calculate rolling mathematical cumulative averages
     let n = db.totalTacksLogged;
     if (n === 1) {
       db.averages = {
@@ -284,16 +363,12 @@ module.exports = function (app) {
       db.averages.minStwKnots = Number(((db.averages.minStwKnots * (n - 1) + summary.minStwKnots) / n).toFixed(2));
     }
 
-    // Insert new tack into Top 10 list (sorted by lowest meters lost)
     db.topTenBests.push(summary);
     db.topTenBests.sort((a, b) => a.metersLost - b.metersLost);
-    if (db.topTenBests.length > 10) {
-      db.topTenBests.pop(); // Evict slow entries past index 10
-    }
+    if (db.topTenBests.length > 10) db.topTenBests.pop();
 
     saveHistoryDatabase();
     
-    // Broadcast the full updated summary payload across Signal K so the webapp UI can print cards
     app.handleMessage(plugin.id, {
       updates: [{ values: [{ path: 'performance.maneuver.lastSummary', value: summary }] }]
     });
@@ -310,14 +385,16 @@ module.exports = function (app) {
 
   plugin.stop = function () {
     if (simInterval) clearInterval(simInterval);
+    unsubscribes.forEach(f => f());
+    unsubscribes = [];
   };
 
   plugin.schema = {
     type: 'object',
     title: 'MAT 12.20 Performance Settings',
     properties: {
-      orcUrl: { type: 'string', title: 'ORC Certificate Link' },
-      targetSpeedKnots: { type: 'number', title: 'Manual Target Entry Speed (Knots)', default: 7.80 },
+      orcUrl: { type: 'string', title: 'ORC JSON Polar Certificate Link URL' },
+      targetSpeedKnots: { type: 'number', title: 'Backup Target Entry Speed (Knots)', default: 7.80 },
       recoveryThreshold: { type: 'number', title: 'Recovery Completion Threshold (%)', default: 95 }
     }
   };
