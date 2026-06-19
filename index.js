@@ -1,65 +1,95 @@
+const fs = require('fs');
+const path = require('path');
+
 module.exports = function (app) {
   const plugin = {};
   let unsubscribes = [];
   let simInterval = null;
   let options = {};
+  
+  // Storage paths for the local knowledge base file
+  let historyFilePath = '';
 
   plugin.id = 'signal-k-tack-and-gybe';
   plugin.name = 'Tack and Gybe Performance Analyzer';
-  plugin.description = 'H5000 rolling-buffer analyzer capturing historical pre-tack entry data using TWA, STW, and Rudder.';
+  plugin.description = 'Advanced performance logger with persistent Top 10 and historical averages database.';
 
-  // --- Real-Data Historical Memory Configuration ---
-  const BUFFER_SIZE = 50; // 5 seconds of rolling history at 10Hz (100ms ticks)
+  const BUFFER_SIZE = 50; 
   let rollingHistory = [];
   
-  // State variables
-  let currentState = 'Straight'; // Straight, Pending, InTurn, Recovery
+  let currentState = 'Straight'; 
   let maneuverType = 'Straight';
   let startTime = 0;
   let pendingStartTime = 0;
+  let accelerationStartTime = 0; // Tracks pure recovery acceleration timing
   
-  // Historical Snapshots taken BEFORE the tack is confirmed
   let snapshotEntrySTW = 0;
   let snapshotEntryVMG = 0;
+  let snapshotEntryTWA = 0;
   
-  let minSTW = 99;
-  let maxSTW = 0;
-  let minVMG = 99;
-  let maxVMG = 0;
+  let minSTW = 99; let maxSTW = 0;
+  let minVMG = 99; let maxVMG = 0;
+  let maxOverturnTWA = 0; // Tracks the helmsman's overshoot peak
+  let timeInDeadZone = 0;  // Seconds spent under 20° TWA
 
-  let actualDistanceMeters = 0;
-  let theoreticalDistanceMeters = 0;
-  let actualVmgDistanceMeters = 0;
-  let theoreticalVmgDistanceMeters = 0;
+  let actualDistanceMeters = 0; let theoreticalDistanceMeters = 0;
+  let actualVmgDistanceMeters = 0; let theoreticalVmgDistanceMeters = 0;
 
-  // --- Live Sensor Caches ---
-  let currentSTW = 4.01;   // m/s
-  let currentTWA = -0.698; // Radians (-40 deg)
-  let currentAWA = -0.488; // Radians
-  let currentRudder = 0.0; // Radians
+  let currentSTW = 4.01;   
+  let currentTWA = -0.698; 
+  let currentAWA = -0.488; 
+  let currentRudder = 0.0; 
 
-  // Simulation variables
   let simStep = 0;
   let isManeuvering = false;
 
+  // Knowledge base state
+  let performanceDatabase = {
+    totalTacksLogged: 0,
+    averages: { metersLost: 0, recoveryDurationSec: 0, minStwKnots: 0 },
+    topTenBests: [] // Sorted by fewest meters lost
+  };
+
   plugin.start = function (startOptions, restartPlugin) {
     options = startOptions || {};
-    app.debug('MAT 12.20 H5000 Engine Active with Look-Back Memory.');
     
+    // Set up persistence paths in Signal K config directory
+    const configDir = app.getDataDirPath();
+    historyFilePath = path.join(configDir, 'tack-history.json');
+    loadHistoryDatabase();
+
     let targetSTW = options.targetSpeedKnots || 7.80; 
     let thresholdPercent = options.recoveryThreshold || 95;
     let recoveryMultiplier = thresholdPercent / 100;
 
-    // Run execution loop at 10Hz (100ms) to match high-frequency H5000 telemetry
     startEngineLoop(targetSTW, recoveryMultiplier);
   };
+
+  function loadHistoryDatabase() {
+    try {
+      if (fs.existsSync(historyFilePath)) {
+        const fileData = fs.readFileSync(historyFilePath, 'utf8');
+        performanceDatabase = JSON.parse(fileData);
+        app.debug('Tack history database loaded successfully.');
+      }
+    } catch (e) {
+      app.error('Failed to parse tack history file, starting clean: ' + e.message);
+    }
+  }
+
+  function saveHistoryDatabase() {
+    try {
+      fs.writeFileSync(historyFilePath, JSON.stringify(performanceDatabase, null, 2), 'utf8');
+    } catch (e) {
+      app.error('Failed to write history file to disk: ' + e.message);
+    }
+  }
 
   function startEngineLoop(targetEntrySTW, recoveryMultiplier) {
     if (simInterval) clearInterval(simInterval);
     
     simInterval = setInterval(() => {
-      // --- SIMULATOR PHYSICS ENGINE ---
-      // Simulates real telemetry behavior including rudder movements
+      // Simulator logic mimicking real boat data, including an intentional overshoot/overturn
       if (!isManeuvering && Math.random() < 0.005) {
         isManeuvering = true;
         simStep = 0;
@@ -68,31 +98,30 @@ module.exports = function (app) {
       if (isManeuvering) {
         simStep++;
         if (simStep <= 15) {
-          // Pre-Turn Entry Phase: Helmsman pulls rudder up to 8 degrees, pinching up slightly
           currentRudder = (8 * Math.PI / 180) * (simStep / 15);
-          let twaDeg = -40 + (12 * (simStep / 15)); // Pinches from -40 down to -28
+          let twaDeg = -40 + (12 * (simStep / 15)); 
           currentTWA = twaDeg * Math.PI / 180;
           currentAWA = (twaDeg * 0.7) * Math.PI / 180;
           currentSTW = (targetEntrySTW - (0.4 * (simStep / 15))) / 1.94384; 
         }
         else if (simStep <= 50) {
-          // Hard Turn Phase: Crossing the wind (Steps 16-50)
-          currentRudder = 12 * Math.PI / 180; // Hard over
+          currentRudder = 12 * Math.PI / 180; 
           let progress = (simStep - 15) / 35;
-          let twaDeg = -28 + (68 * progress); // Sweeps through 0 up to +40
+          // Sweeps through 0 up to 46 degrees (deliberately overshooting upwind target of 40)
+          let twaDeg = -28 + (74 * progress); 
           currentTWA = twaDeg * Math.PI / 180;
           currentAWA = (twaDeg * 0.7) * Math.PI / 180;
-
           let speedFactor = 0.95 - (0.45 * Math.sin(progress * Math.PI / 2));
           currentSTW = (targetEntrySTW * speedFactor) / 1.94384;
         }
         else if (simStep <= 220) {
-          // Acceleration Phase
-          currentRudder = -2 * Math.PI / 180; // Counter rudder to straighten out
-          currentTWA = 40 * Math.PI / 180;
-          currentAWA = 28 * Math.PI / 180;
-          let accelProgress = (simStep - 50) / 170;
-          let speedFactor = 0.50 + (0.50 * Math.sqrt(accelProgress));
+          let progress = (simStep - 50) / 170;
+          currentRudder = -2 * Math.PI / 180; 
+          // Helmsman slowly brings the boat back up from 46° down to standard 40° upwind target
+          let twaDeg = 46 - (6 * Math.min(1, progress * 3));
+          currentTWA = twaDeg * Math.PI / 180;
+          currentAWA = (twaDeg * 0.7) * Math.PI / 180;
+          let speedFactor = 0.50 + (0.50 * Math.sqrt(progress));
           currentSTW = (targetEntrySTW * speedFactor) / 1.94384;
         }
         else {
@@ -100,14 +129,12 @@ module.exports = function (app) {
           currentRudder = 0;
         }
       } else { 
-        // Baseline Sailing Data
         currentTWA = -40 * Math.PI / 180;
         currentAWA = -28 * Math.PI / 180;
         currentSTW = targetEntrySTW / 1.94384; 
         currentRudder = 0.0;
       }
 
-      // Execute analytical pipeline
       runAnalysisPipeline(targetEntrySTW, recoveryMultiplier);
     }, 100);
   }
@@ -121,38 +148,34 @@ module.exports = function (app) {
     let liveVmgMS = currentSTW * Math.cos(currentTWA);
     let vmgKnots = liveVmgMS * 1.94384;
 
-    // Maintain the Rolling Memory Buffer while sailing normally
     if (currentState === 'Straight' || currentState === 'Pending') {
       rollingHistory.push({ stw: stwKnots, vmg: vmgKnots, twa: twaDeg });
-      if (rollingHistory.length > BUFFER_SIZE) {
-        rollingHistory.shift(); // Evict oldest data to maintain a strict 5-second window
-      }
+      if (rollingHistory.length > BUFFER_SIZE) rollingHistory.shift();
     }
 
-    // --- CRITERIA STAGE 1: ENTRY PHASE DETECTION (PENDING) ---
+    // --- DETECTION: PENDING ENTRY ---
     if (currentState === 'Straight') {
-      // Trigger pending status if rudder is turned (>5°) AND boat pinches above 32° TWA
       if (Math.abs(rudderDeg) > 5 && Math.abs(twaDeg) < 32) {
         currentState = 'Pending';
         pendingStartTime = Date.now();
         
-        // Lock in historical performance snapshots from 5 seconds ago!
-        let historicalBase = rollingHistory[0] || { stw: stwKnots, vmg: vmgKnots };
+        let historicalBase = rollingHistory[0] || { stw: stwKnots, vmg: vmgKnots, twa: twaDeg };
         snapshotEntrySTW = historicalBase.stw;
         snapshotEntryVMG = historicalBase.vmg;
+        snapshotEntryTWA = Math.abs(historicalBase.twa);
+        
+        maxOverturnTWA = 0;
+        timeInDeadZone = 0;
       }
     }
 
-    // --- CRITERIA STAGE 2: PASS THROUGH THE WIND TRIGGER (CONFIRMED) ---
+    // --- DETECTION: WIND CROSSING TRIGGER ---
     if (currentState === 'Pending') {
       let timeInPending = (Date.now() - pendingStartTime) / 1000;
-      
-      // Look back at the oldest index in our buffer to verify a sign change relative to the wind
       let historyEntry = rollingHistory[0] || { twa: twaDeg };
       let signChange = (historyEntry.twa < 0 && twaDeg > 0) || (historyEntry.twa > 0 && twaDeg < 0);
 
       if (signChange && Math.abs(twaDeg) < 15) {
-        // Boat has officially crossed the wind window! Confirm the tack
         currentState = 'InTurn';
         maneuverType = 'Tack';
         startTime = Date.now();
@@ -160,18 +183,15 @@ module.exports = function (app) {
         minSTW = stwKnots; maxSTW = stwKnots;
         minVMG = vmgKnots; maxVMG = vmgKnots;
         
-        actualDistanceMeters = 0;
-        theoreticalDistanceMeters = 0;
-        actualVmgDistanceMeters = 0;
-        theoreticalVmgDistanceMeters = 0;
+        actualDistanceMeters = 0; theoreticalDistanceMeters = 0;
+        actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0;
       } 
-      // Safe-Luff Timeout: Reset if the boat stays in pending over 10s without crossing through the wind
       else if (timeInPending > 10.0 || Math.abs(twaDeg) > 35) {
         currentState = 'Straight';
       }
     }
 
-    // --- CRITERIA STAGE 3: METRIC ANALYSIS & RECOVERY ---
+    // --- PROCESSING & RECOVERY LOGIC ---
     if (currentState === 'InTurn' || currentState === 'Recovery') {
       let timeElapsedSec = (Date.now() - startTime) / 1000;
 
@@ -180,7 +200,16 @@ module.exports = function (app) {
       if (vmgKnots < minVMG) minVMG = vmgKnots;
       if (vmgKnots > maxVMG) maxVMG = vmgKnots;
 
-      // Integrate lost distance dynamically relative to frozen historical baseline entries
+      if (Math.abs(twaDeg) < 20) {
+        timeInDeadZone += 0.1; // Accumulate time sails spent flapping (100ms updates)
+      }
+
+      // Track helmsman's maximum bearing-away overshoot angle relative to target upwind entry
+      let currentOvershoot = Math.abs(twaDeg) - snapshotEntryTWA;
+      if (currentState === 'Recovery' && currentOvershoot > maxOverturnTWA) {
+        maxOverturnTWA = currentOvershoot;
+      }
+
       actualDistanceMeters += (currentSTW * 0.1);
       theoreticalDistanceMeters += ((snapshotEntrySTW / 1.94384) * 0.1); 
       
@@ -190,35 +219,87 @@ module.exports = function (app) {
       let metersLost = theoreticalDistanceMeters - actualDistanceMeters;
       let vmgMetersLost = theoreticalVmgDistanceMeters - actualVmgDistanceMeters;
 
+      // Transition turn -> recovery as sails catch air on opposite board
       if (currentState === 'InTurn' && Math.abs(twaDeg) > 22) {
         currentState = 'Recovery';
+        accelerationStartTime = Date.now(); // Start pure acceleration clock
       }
 
       emitDelta('performance.maneuver.type', maneuverType);
       emitDelta('performance.maneuver.state', currentState);
-      emitDelta('performance.maneuver.timeElapsed', Number(timeElapsedSec.toFixed(1)));
+      emitDelta('performance.maneuver.metersLost', Number(metersLost.toFixed(1)));
       emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
       emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
-      emitDelta('performance.maneuver.metersLost', Number(metersLost.toFixed(1)));
-      emitDelta('performance.maneuver.vmgMetersLost', Number(vmgMetersLost.toFixed(1)));
-      emitDelta('performance.maneuver.minStwKnots', Number(minSTW.toFixed(2)));
       emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
 
-      // Recovery exit condition mapped directly to snapshot history targets
+      // --- CRITERIA COMPLETED: LOG PERFORMANCE TO KNOWLEDGEBASE ---
       if (currentState === 'Recovery' && stwKnots >= (snapshotEntrySTW * recoveryMultiplier)) {
+        let recoveryDuration = (Date.now() - accelerationStartTime) / 1000;
+        
+        let tackSummary = {
+          timestamp: new Date().toISOString(),
+          metersLost: Number(metersLost.toFixed(1)),
+          vmgMetersLost: Number(vmgMetersLost.toFixed(1)),
+          recoveryDurationSec: Number(recoveryDuration.toFixed(1)),
+          minStwKnots: Number(minSTW.toFixed(2)),
+          maxStwKnots: Number(maxSTW.toFixed(2)),
+          entryStwKnots: Number(snapshotEntrySTW.toFixed(2)),
+          entryVmgKnots: Number(snapshotEntryVMG.toFixed(2)),
+          maxVmgKnots: Number(maxVMG.toFixed(2)),
+          overturnDegrees: Number(Math.max(0, maxOverturnTWA).toFixed(1)),
+          deadZoneSec: Number(timeInDeadZone.toFixed(1))
+        };
+
+        logTackToDatabase(tackSummary);
+
         currentState = 'Straight';
         maneuverType = 'Straight';
-        rollingHistory = []; // Flush buffer to handle clean tracking reset
+        rollingHistory = [];
         emitDelta('performance.maneuver.state', 'Ready');
       }
     } else {
-      // Default Streaming State
       emitDelta('performance.maneuver.type', 'Straight');
       emitDelta('performance.maneuver.state', currentState === 'Pending' ? 'InTurn' : 'Ready');
       emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
       emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
       emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
     }
+  }
+
+  function logTackToDatabase(summary) {
+    let db = performanceDatabase;
+    db.totalTacksLogged++;
+
+    // Calculate rolling mathematical cumulative averages
+    let n = db.totalTacksLogged;
+    if (n === 1) {
+      db.averages = {
+        metersLost: summary.metersLost,
+        recoveryDurationSec: summary.recoveryDurationSec,
+        minStwKnots: summary.minStwKnots
+      };
+    } else {
+      db.averages.metersLost = Number(((db.averages.metersLost * (n - 1) + summary.metersLost) / n).toFixed(1));
+      db.averages.recoveryDurationSec = Number(((db.averages.recoveryDurationSec * (n - 1) + summary.recoveryDurationSec) / n).toFixed(1));
+      db.averages.minStwKnots = Number(((db.averages.minStwKnots * (n - 1) + summary.minStwKnots) / n).toFixed(2));
+    }
+
+    // Insert new tack into Top 10 list (sorted by lowest meters lost)
+    db.topTenBests.push(summary);
+    db.topTenBests.sort((a, b) => a.metersLost - b.metersLost);
+    if (db.topTenBests.length > 10) {
+      db.topTenBests.pop(); // Evict slow entries past index 10
+    }
+
+    saveHistoryDatabase();
+    
+    // Broadcast the full updated summary payload across Signal K so the webapp UI can print cards
+    app.handleMessage(plugin.id, {
+      updates: [{ values: [{ path: 'performance.maneuver.lastSummary', value: summary }] }]
+    });
+    app.handleMessage(plugin.id, {
+      updates: [{ values: [{ path: 'performance.maneuver.database', value: db }] }]
+    });
   }
 
   function emitDelta(path, value) {
@@ -229,7 +310,6 @@ module.exports = function (app) {
 
   plugin.stop = function () {
     if (simInterval) clearInterval(simInterval);
-    app.debug('Plugin stopped');
   };
 
   plugin.schema = {
