@@ -11,7 +11,8 @@
     "url": "git+https://github.com/theseal666/Signal-k-tack-and-gybe.git"
   },
   "keywords": [
-    "signalk-node-server-plugin"
+    "signalk-node-server-plugin",
+    "signalk-webapp"
   ],
   "author": "Niclas Dahlgren",
   "license": "Apache-2.0",
@@ -19,5 +20,8 @@
   "bugs": {
     "url": "https://github.com/theseal666/Signal-k-tack-and-gybe/issues"
   },
-  "homepage": "https://github.com/theseal666/Signal-k-tack-and-gybe#readme"
+  "homepage": "https://github.com/theseal666/Signal-k-tack-and-gybe#readme",
+  "signalk": {
+    "appIcon": "./icon.png"
+  }
 }

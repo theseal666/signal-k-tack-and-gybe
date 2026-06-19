@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tack & Gybe Analyzer Dashboard</title>
+  <!-- Load Chart.js for the timeline visualization -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #121214;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 20px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 300px 1fr;
+      gap: 20px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .panel {
+      background: #1a1a1e;
+      border: 1px solid #2d2d34;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    h2 { margin-top: 0; color: #f8fafc; font-size: 1.2rem; border-bottom: 1px solid #2d2d34; padding-bottom: 10px; }
+    #boatCanvas {
+      background: #141416;
+      border-radius: 8px;
+      display: block;
+      margin: 0 auto;
+    }
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px dashed #2d2d34;
+    }
+    .metric-value { font-weight: bold; color: #38bdf8; }
+    .status-badge {
+      display: inline-block;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-weight: bold;
+      text-align: center;
+      width: 100px;
+    }
+    .state-Ready { background: #1e293b; color: #94a3b8; }
+    .state-InTurn { background: #b45309; color: #fef08a; animation: pulse 1s infinite alternate; }
+    .state-Recovery { background: #1e3a8a; color: #93c5fd; }
+    @keyframes pulse { from { opacity: 0.6; } to { opacity: 1; } }
+  </style>
+</head>
+<body>
+
+  <div style="max-width:1400px; margin: 0 auto 20px auto; display:flex; justify-content:space-between; align-items:center;">
+    <h1 style="margin:0; font-size:1.8rem;">MAT 12.20 Performance Analyzer</h1>
+    <div id="maneuverState" class="status-badge state-Ready">Ready</div>
+  </div>
+
+  <div class="grid">
+    <!-- Left Column: Top-Down Boat & Live Stats -->
+    <div class="panel">
+      <h2>Vessel Orientation</h2>
+      <canvas id="boatCanvas" width="260" height="260"></canvas>
+      
+      <div style="margin-top:20px;">
+        <h2>Telemetry</h2>
+        <div class="metric-row"><span>Type:</span><span id="valType" class="metric-value">-</span></div>
+        <div class="metric-row"><span>STW:</span><span id="valSTW" class="metric-value">0.00 kn</span></div>
+        <div class="metric-row"><span>VMG:</span><span id="valVMG" class="metric-value">0.00 kn</span></div>
+        <div class="metric-row"><span>AWA:</span><span id="valAWA" class="metric-value">0°</span></div>
+        <div class="metric-row"><span>Meters Lost:</span><span id="valLost" style="color:#ef4444;" class="metric-value">0.0 m</span></div>
+      </div>
+    </div>
+
+    <!-- Right Column: Timeline Graph -->
+    <div class="panel">
+      <h2>Performance Timeline</h2>
+      <div style="position: relative; height: 450px; width: 100%;">
+        <canvas id="timelineChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // --- Initialize Data Arrays ---
+    const maxDataPoints = 100;
+    const labels = Array(maxDataPoints).fill('');
+    const stwData = Array(maxDataPoints).fill(0);
+    const vmgData = Array(maxDataPoints).fill(0);
+    const awaData = Array(maxDataPoints).fill(0);
+
+    // --- Setup Chart.js Timeline ---
+    const ctxChart = document.getElementById('timelineChart').getContext('2d');
+    const chart = new Chart(ctxChart, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [
+          { label: 'STW (kn)', data: stwData, borderColor: '#38bdf8', borderWidth: 2, pointRadius: 0, fill: false },
+          { label: 'VMG (kn)', data: vmgData, borderColor: '#34d399', borderWidth: 2, pointRadius: 0, fill: false },
+          { label: 'AWA (deg)', data: awaData, borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa' }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          y: { type: 'linear', display: true, position: 'left', grid: { color: '#2d2d34' }, title: { display: true, text: 'Knots' } },
+          yAwa: { type: 'linear', display: true, position: 'right', min: -180, max: 180, grid: { drawOnChartArea: false }, title: { display: true, text: 'AWA Degrees' } },
+          x: { grid: { display: false } }
+        },
+        plugins: { legend: { labels: { color: '#e2e8f0' } } }
+      }
+    });
+
+    // --- Canvas Boat Top-Down Visualization Render Loop ---
+    const canvas = document.getElementById('boatCanvas');
+    const ctxBoat = canvas.getContext('2d');
+
+    function drawVessel(awaDeg) {
+      ctxBoat.clearRect(0, 0, canvas.width, canvas.height);
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+
+      // Draw Wind Arrow
+      ctxBoat.save();
+      ctxBoat.translate(cx, cy);
+      ctxBoat.rotate((awaDeg * Math.PI) / 180);
+      ctxBoat.strokeStyle = '#fbbf24';
+      ctxBoat.lineWidth = 3;
+      ctxBoat.beginPath();
+      ctxBoat.moveTo(0, -110);
+      ctxBoat.lineTo(0, -70);
+      ctxBoat.lineTo(-8, -80);
+      ctxBoat.moveTo(0, -70);
+      ctxBoat.lineTo(8, -80);
+      ctxBoat.stroke();
+      ctxBoat.fillStyle = '#fbbf24';
+      ctxBoat.font = '10px sans-serif';
+      ctxBoat.fillText("WIND", -14, -118);
+      ctxBoat.restore();
+
+      // Draw Boat Hull (Top down view facing Upwards)
+      ctxBoat.save();
+      ctxBoat.translate(cx, cy);
+      ctxBoat.strokeStyle = '#ffffff';
+      ctxBoat.lineWidth = 2;
+      ctxBoat.beginPath();
+      ctxBoat.moveTo(0, -60); // Bow
+      ctxBoat.bezierCurveTo(25, -30, 30, 20, 22, 55); // Starboard Hull
+      ctxBoat.lineTo(-22, 55); // Transom
+      ctxBoat.bezierCurveTo(-30, 20, -25, -30, 0, -60); // Port Hull
+      ctxBoat.stroke();
+      ctxBoat.restore();
+    }
+
+    // --- Connect Live to Signal K Stream ---
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/signalk/v1/stream?subscribe=none`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      // Subscribe explicitly to our performance tracker output paths
+      const subscription = {
+        context: "vessels.self",
+        subscribe: [{ path: "performance.maneuver.*", period: 200 }]
+      };
+      ws.send(JSON.stringify(subscription));
+    };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (!msg.updates) return;
+
+      msg.updates.forEach(update => {
+        update.values.forEach(kv => {
+          if (kv.path === 'performance.maneuver.state') {
+            const badge = document.getElementById('maneuverState');
+            badge.innerText = kv.value;
+            badge.className = `status-badge state-${kv.value}`;
+          }
+          if (kv.path === 'performance.maneuver.type') document.getElementById('valType').innerText = kv.value;
+          if (kv.path === 'performance.maneuver.liveStwKnots') {
+            document.getElementById('valSTW').innerText = kv.value.toFixed(2) + " kn";
+            stwData.push(kv.value); stwData.shift();
+          }
+          if (kv.path === 'performance.maneuver.liveVmgKnots') {
+            document.getElementById('valVMG').innerText = kv.value.toFixed(2) + " kn";
+            vmgData.push(kv.value); vmgData.shift();
+          }
+          if (kv.path === 'performance.maneuver.liveAwaDegrees') {
+            document.getElementById('valAWA').innerText = kv.value.toFixed(1) + "°";
+            awaData.push(kv.value); awaData.shift();
+            drawVessel(kv.value); // Re-draw wind orientation
+          }
+          if (kv.path === 'performance.maneuver.metersLost') {
+            document.getElementById('valLost').innerText = kv.value.toFixed(1) + " m";
+          }
+        });
+      });
+      chart.update('none'); // Silent chart refresh (no animation lag)
+    };
+
+    // Initial layout render
+    drawVessel(-42);
+  </script>
+</body>
+</html>
