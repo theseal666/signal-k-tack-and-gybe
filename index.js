@@ -10,10 +10,16 @@ module.exports = function (app) {
 
   plugin.start = function (startOptions, restartPlugin) {
     options = startOptions || {};
-    app.debug('MAT 12.20 Performance Engine Active with VMG & AWA tracking.');
+    app.debug('MAT 12.20 Performance Engine Active.');
     
     let targetSTW = options.targetSpeedKnots || 8.54;
-    startSimulator(targetSTW);
+    // Read the threshold from settings, convert percentage (e.g. 95) to a decimal multiplier (0.95)
+    let thresholdPercent = options.recoveryThreshold || 95;
+    let recoveryMultiplier = thresholdPercent / 100;
+    
+    app.debug(`Recovery complete target set to ${thresholdPercent}% of target speed.`);
+
+    startSimulator(targetSTW, recoveryMultiplier);
   };
 
   // --- Live Sensor Telemetry Cache ---
@@ -42,7 +48,7 @@ module.exports = function (app) {
   let simStep = 0;
   let isManeuvering = false;
 
-  function startSimulator(targetEntrySTW) {
+  function startSimulator(targetEntrySTW, recoveryMultiplier) {
     if (simInterval) clearInterval(simInterval);
     
     simInterval = setInterval(() => {
@@ -67,6 +73,7 @@ module.exports = function (app) {
           currentTWA = 65 * Math.PI / 180;
           currentAWA = 42 * Math.PI / 180;
           let accelProgress = (simStep - 60) / 160;
+          // Simulates boat speed accelerating back up to 100% of target entry speed
           let knots = (targetEntrySTW * 0.45) + ((targetEntrySTW * 0.55) * Math.sqrt(accelProgress));
           currentSTW = knots / 1.94384;
         } 
@@ -79,11 +86,11 @@ module.exports = function (app) {
         currentSTW = targetEntrySTW / 1.94384; 
       }
 
-      runAnalysisEngine(targetEntrySTW);
+      runAnalysisEngine(targetEntrySTW, recoveryMultiplier);
     }, 100);
   }
 
-  function runAnalysisEngine(targetEntrySTW) {
+  function runAnalysisEngine(targetEntrySTW, recoveryMultiplier) {
     let stwKnots = currentSTW * 1.94384;
     let twaDeg = currentTWA * 180 / Math.PI;
     let awaDeg = currentAWA * 180 / Math.PI;
@@ -141,16 +148,20 @@ module.exports = function (app) {
       emitDelta('performance.maneuver.metersLost', Number(metersLost.toFixed(1)));
       emitDelta('performance.maneuver.vmgMetersLost', Number(vmgMetersLost.toFixed(1)));
       emitDelta('performance.maneuver.minStwKnots', Number(minSTW.toFixed(2)));
-      
-      // NEW: Broadcast live AWA during active maneuver tracking
       emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
+
+      // --- DYNAMIC EXIT CONDITION ---
+      // Uses the user-defined threshold instead of a hardcoded 95%
+      if (currentState === 'Recovery' && stwKnots >= (targetEntrySTW * recoveryMultiplier)) {
+        currentState = 'Straight';
+        maneuverType = 'Straight';
+        emitDelta('performance.maneuver.state', 'Ready');
+      }
     } else {
       emitDelta('performance.maneuver.type', 'Straight');
       emitDelta('performance.maneuver.state', 'Ready');
       emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
       emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
-      
-      // NEW: Broadcast live AWA during default state
       emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
     }
   }
@@ -166,6 +177,7 @@ module.exports = function (app) {
     app.debug('Plugin stopped');
   };
 
+  // --- UPDATED CONFIGURATION SCHEMA ---
   plugin.schema = {
     type: 'object',
     title: 'MAT 12.20 Performance Settings',
@@ -178,6 +190,12 @@ module.exports = function (app) {
         type: 'number',
         title: 'Manual Target Entry Speed (Knots)',
         default: 8.54
+      },
+      recoveryThreshold: {
+        type: 'number',
+        title: 'Recovery Completion Threshold (%)',
+        description: 'The percentage of your target speed the boat must reach to mark a maneuver as completely finished (e.g., 90% or 95%). lower this if your boat stays stuck in the recovery state.',
+        default: 95
       }
     }
   };
