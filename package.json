@@ -1,0 +1,23 @@
+{
+  "name": "signal-k-tack-and-gybe",
+  "version": "1.0.0",
+  "description": "Analyzes tacks and gybes using high-frequency H5000 data.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theseal666/Signal-k-tack-and-gybe.git"
+  },
+  "keywords": [
+    "signalk-node-server-plugin"
+  ],
+  "author": "Niclas Dahlgren",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/theseal666/Signal-k-tack-and-gybe/issues"
+  },
+  "homepage": "https://github.com/theseal666/Signal-k-tack-and-gybe#readme"
+}
