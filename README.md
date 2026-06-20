@@ -1,62 +1,84 @@
-Tack and Gybe Performance Analyzer (H5000 Edition)
-An advanced, high-performance Signal K plugin designed for the MAT 12.20 racing platform. This engine interfaces with live NMEA 2000 networks (optimized for B&G H5000 processors) to analyze maneuvers using high-frequency rolling memory lookup arrays.
-It ignores simple tactical luffs by verifying full cross-wind sign alignment, integrates dynamic Speed Through Water (STW) and Velocity Made Good (VMG) meters lost, tracks helm overshoot profiles, processes ORC polar certificate files directly, and persists historical statistics to an on-deck local knowledge base.
-Repository File Structure
-signal-k-tack-and-gybe/
-├── index.js          # High-frequency 10Hz Tracking Engine, ORC API Fetcher & File System IO
-├── package.json      # Node.js Dependencies & Signal K Hooks
-├── README.md         # Documentation & Mathematical Engine Breakdown
-└── public/
-    └── index.html    # 3-Column Chart.js & HTML5 Canvas Telemetry Dashboard
-Core Analytical Logic & Lifecycle
-Unlike basic monitoring tools that track live data as it happens, this plugin utilizes a 50-sample historical ring buffer running at 10Hz (every 100ms). This allows the plugin to look back into the past to capture your baseline metrics before the boat began slowing down for the turn.
-  [ Steady Upwind ] ────► Dynamic ORC Target Resolution (TWS vs. Polar Grid)
-         │ 
-         ▼
-  [ 1. Entry Phase (Pending) ]  ──► Senses Rudder > 5° & TWA < 32°
-         │                          Freezes 5s Historical Speed Snapshots
-         ▼
-  [ 2. Wind Apex (Confirmed) ]  ──► Verifies TWA Crosses 0° (Sign-Change Check)
-         │                          Overrules False Luffs / Starts Meters Lost Integration
-         ▼
-  [ 3. Recovery Phase ]         ──► Gauges Helm Overturn & Dead Zone Slag Time
-         │                          Climbs toward Target Exit Speed Multiplier
-         ▼
-  [ 4. Knowledgebase Commit ]   ──► Stores Summary payload to 'tack-history.json'
-                                    Updates Rolling Averages & Filters All-Time Top 10
-Phase-by-Phase Operational Mechanics
-0. Dynamic Target Setting (ORC Integration)
-If an ORC Certificate JSON URL is provided, the plugin fetches the boat's rating files at startup. As you sail, it continuously monitors live True Wind Speed (TWS) from the H5000 and calculates an interpolated vmgUpwind target speed from your official polar curves. This updates your speed baseline dynamically as the breeze changes.
-1. The Entry Phase (Maneuver Pending)
-While sailing normally, the plugin maintains a running 5-second window of data in memory. A maneuver is flagged as Pending the exact millisecond the Rudder Angle exceeds 5° while the True Wind Angle (TWA) pinches tighter than 32°.
-Look-Back Catch: The engine instantly freezes the data index from 5 seconds ago in the historical array. This captures your true pre-maneuver entry speed before helm resistance or sail spill began decelerating the hull.
-2. The Cross-Wind Trigger (Maneuver Confirmed)
-The system sits in a Pending state for up to 10 seconds.
-The Luffing Shield: If the helmsman is simply luffing to defend a lane against a windward boat, the boat will head up but will not cross the eye of the wind. The pending window will time out safely, discard the snapshot, and register no false tack.
-The Confirmation: A tack is officially logged only when the TWA swaps its mathematical sign (e.g., transitioning from -35° Port to +5° Starboard). The state changes to InTurn, T=0 is marked, and the frozen look-back speeds are assigned as the absolute baseline references.
-3. Metric Integration & Tracking
-Once confirmed, the execution block samples metrics at 10Hz:
-Meters Lost Calculation: Calculated as:
-Meters Lost=∑( 
-1.94384
-Historical Snapshot STW−Live STW
-​	
- )×0.1 seconds
-Helmsman Overturn: Tracks the maximum deviation angle where the helmsman pressed the bow down below the entry upwind angle target to accelerate out of the speed hole before bringing the boat back up to close-hauled targets.
-Dead Zone Counter: Tracks the exact amount of time in seconds spent with a TWA under 20° (where sails are luffing and generating zero lift).
-4. File-System Persistence
-When the live STW recovers to your user-adjusted threshold (e.g., 95% of your pre-tack snapshot entry speed), the maneuver is closed out. The summary metrics are instantly committed to a local file system flat-file (tack-history.json), protecting your performance data through server reboots or system resets.
-Emitted Signal K Delta Paths
-Your frontend dashboard or NMEA gateway instruments can bind directly to these live streaming update data paths:
-Path	Type	Description
-performance.maneuver.state	String	Current engine status (Ready, InTurn, Recovery)
-performance.maneuver.metersLost	Number	Cumulative boat length equivalent distance lost in real-time (m)
-performance.maneuver.liveStwKnots	Number	High-frequency filtered Speed Through Water (kn)
-performance.maneuver.liveVmgKnots	Number	Computed Velocity Made Good relative to the wind (kn)
-performance.maneuver.lastSummary	Object	Deep analytical telemetry profile card of the completed tack
-performance.maneuver.database	Object	Fleet rolling lifetime averages and Top 10 leaderboard entries
-Configuration Settings
-Adjust these thresholds directly inside the Server -> Plugin Configuration dashboard interface:
-ORC JSON Polar Certificate Link URL: The URL endpoint hosting your boat's official RMS/ORC JSON polar file for dynamic target resolution.
-Backup Target Entry Speed (Knots): Base speed reference targets matching target boat polar data templates if an ORC certificate is not configured or offline (Default: 7.80 kn).
-Recovery Completion Threshold (%): The percentage of your look-back entry speed you must reach to mark a maneuver as completely completed (Default: 95%). Lower this parameter if choppy wave conditions cause your boat to get trapped in long recovery tracking states.
+# Tack and Gybe Performance Analyzer (Signal K plugin)
+
+A focused Signal K plugin to analyze tacks and gybes, produce precise summary metrics, and maintain a rolling history and Top‑10 knowledge base. The analyzer is source‑agnostic: it consumes Signal K deltas (from instruments or an external sim plugin) on the same paths and does not simulate data internally.
+
+## Quick overview
+
+- Rolling history: 50 samples for look‑back entry snapshots.
+- State machine: Straight → Pending → InTurn → Recovery → Straight.
+- DT‑aware integration for distance (meters) and VMG to increase precision.
+- Tracks meters lost, helm overturn and dead‑zone time.
+- Persists maneuver summaries to `tack-history.json` and maintains rolling averages + Top‑10.
+
+## Repository layout
+
+- `index.js` — Main plugin engine (subscription handling, analysis, ORC fetch, persistence)
+- `package.json` — Dependencies
+- `README.md` — Documentation
+- `public/index.html` — Optional dashboard (binds to emitted Signal K paths)
+
+## Signal K paths the plugin subscribes to
+
+These paths must be provided by live instruments or your external sim plugin (numeric values):
+
+- `navigation.speedThroughWater` (m/s)
+- `environment.wind.angleTrueWater` (radians)
+- `environment.wind.angleApparent` (radians)
+- `steering.rudderAngle` (radians)
+- `environment.wind.speedTrue` (m/s)
+
+## Emitted Signal K delta paths
+
+- `performance.maneuver.state` — { state, stwKnots, twaDeg, vmgKnots, stale?, metersLostAccum }
+- `performance.maneuver.lastSummary` — Detailed summary object when a maneuver closes
+- `performance.maneuver.database` — Rolling averages and Top‑10 leaderboard
+
+## Precision & metric details
+
+- Integration is dt‑aware: distances and VMG are integrated using measured dt between analysis ticks.
+- Units:
+  - Inputs: `speedThroughWater` and `wind.speedTrue` are treated as m/s.
+  - Conversions for knots ↔ m/s are provided for display or configuration.
+- Meters lost:
+  - Accumulated by integrating instantaneous speed deficit (m/s) while boat is below the snapshot entry speed.
+  - Final `metersLost` uses `max(accumulated_deficit, theoreticalDistance - actualDistance)` to reduce sensitivity to short spikes.
+- VMG integration: actual and theoretical VMG distance accumulated with dt.
+- Overturn and dead‑zone:
+  - Tracks maximum overturn (deg) relative to entry TWA and time spent with |TWA| < 20°.
+
+## Configuration
+
+- `orcUrl` — optional URL to ORC/RMS JSON polar file
+- `targetSpeedKnots` — fallback / manual polar target (knots)
+- `recoveryThreshold` — percentage (0–100) of entry speed to consider maneuver recovered (default 95)
+
+## Operational notes & testing
+
+- The plugin is source‑agnostic — ensure your external sim plugin publishes exactly the same paths with numeric values (not strings).
+- If no fresh data (>2s), the analysis loop marks state `stale` and avoids false detections.
+- To test without instruments:
+  1. Run your sim plugin that publishes the required Signal K paths.
+  2. Start this analyzer plugin.
+  3. Confirm `performance.maneuver.state` deltas appear and `tack-history.json` receives summaries when maneuvers close.
+
+## Example `performance.maneuver.lastSummary` schema
+
+```json
+{
+  "type": "Tack",
+  "timestamp": "2026-06-20T19:52:25.000Z",
+  "metersLost": 3.4,
+  "recoveryDurationSec": 8.2,
+  "minStwKnots": 4.12,
+  "maxOverturnTWA": 12.3,
+  "timeInDeadZoneSec": 1.42,
+  "actualDistanceMeters": 5.23,
+  "theoreticalDistanceMeters": 8.12,
+  "actualVmgDistanceMeters": 2.34,
+  "theoreticalVmgDistanceMeters": 3.45
+}
+```
+
+---
+
+If you want changes to the README tone, additional examples, or a testing harness section, tell me and I'll update it.
