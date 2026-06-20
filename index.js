@@ -43,9 +43,6 @@ module.exports = function (app) {
 
   let orcTargetSTW = 7.80; 
 
-  let simStep = 0;
-  let isManeuvering = false;
-
   let globalRecoveryMultiplier = 0.95;
 
   let performanceDatabase = {
@@ -130,30 +127,20 @@ module.exports = function (app) {
     emitDelta('performance.maneuver.lastSummary', summary);
   }
 
-  // Simple simulation physics to keep the analyzer live when no instrument data present
-  function executeSimulationPhysics() {
-    // A lightweight simulation that varies TWA and STW to stimulate state changes
-    simStep++;
-    const wobble = Math.sin(simStep / 10) * 0.2;
-    currentRudder = Math.sin(simStep / 8) * 0.1;
-    currentTWA = -0.5 + wobble; // radians
-    currentAWA = currentTWA - 0.1;
-    currentSTW = 4.0 + Math.abs(Math.cos(simStep / 15)) * 1.5;
-    // call analysis
-    runAnalysisPipeline(orcTargetSTW, globalRecoveryMultiplier);
-  }
+  // Note: This plugin must be agnostic to the data source. It SHOULD NOT run an internal simulation.
+  // It processes whatever data arrives via app.subscriptionmanager (either instrument feeds or your separate sim plugin publishing the same paths).
 
   function startEngineLoop(recoveryMultiplier) {
     globalRecoveryMultiplier = recoveryMultiplier || 0.95;
     if (simInterval) clearInterval(simInterval);
 
+    // Run analysis periodically but do NOT mutate current* variables here. The data must come from
+    // the Signal K subscription (real instruments) or a separate sim plugin that publishes the same paths.
     simInterval = setInterval(() => {
-      // If no subscriptions are active, run the simulator loop to feed the analyzer
-      if (unsubscribes.length === 0) {
-        executeSimulationPhysics();
-      } else {
-        // If we have live data, still run analysis periodically
+      try {
         runAnalysisPipeline(orcTargetSTW, globalRecoveryMultiplier);
+      } catch (e) {
+        app.error('Engine loop error: ' + e.message);
       }
     }, 200);
   }
