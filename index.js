@@ -66,15 +66,15 @@ module.exports = function (app) {
     return Number.isFinite(n) ? n : null;
   }
 
-+  // Normalize radians to -PI..PI
-+  function normalizeRadians(a) {
-+    let v = Number(a);
-+    if (!Number.isFinite(v)) return null;
-+    while (v <= -Math.PI) v += 2 * Math.PI;
-+    while (v > Math.PI) v -= 2 * Math.PI;
-+    return v;
-+  }
-+
+  // Normalize radians to -PI..PI
+  function normalizeRadians(a) {
+    let v = Number(a);
+    if (!Number.isFinite(v)) return null;
+    while (v <= -Math.PI) v += 2 * Math.PI;
+    while (v > Math.PI) v -= 2 * Math.PI;
+    return v;
+  }
+
   // Load/Save history
   function loadHistoryDatabase() {
     try {
@@ -298,7 +298,7 @@ module.exports = function (app) {
       state: currentState,
       stwKnots: Number(stwKnots.toFixed(3)),
       twaDeg: Number(twaDeg.toFixed(2)),
-+      awaDeg: Number(awaDeg.toFixed(2)),
+      awaDeg: Number(awaDeg.toFixed(2)),
       vmgKnots: Number(vmgKnots.toFixed(3)),
       metersLostAccum: Number(metersLostAccum.toFixed(2))
     });
@@ -351,19 +351,17 @@ module.exports = function (app) {
                   lastDataTimestamp = Date.now();
                   break;
                 case 'environment.wind.angleTrueWater':
--                  currentTWA = v; // radians
-+                  const twaN = normalizeRadians(v);
-+                  if (twaN === null) return;
-+                  currentTWA = twaN; // radians normalized
-                   lastDataTimestamp = Date.now();
-                   break;
+                  const twaN = normalizeRadians(v);
+                  if (twaN === null) return;
+                  currentTWA = twaN; // radians normalized
+                  lastDataTimestamp = Date.now();
+                  break;
                 case 'environment.wind.angleApparent':
--                  currentAWA = v; // radians
-+                  const awaN = normalizeRadians(v);
-+                  if (awaN === null) return;
-+                  currentAWA = awaN; // radians normalized
-                   lastDataTimestamp = Date.now();
-                   break;
+                  const awaN = normalizeRadians(v);
+                  if (awaN === null) return;
+                  currentAWA = awaN; // radians normalized
+                  lastDataTimestamp = Date.now();
+                  break;
                 case 'steering.rudderAngle':
                   currentRudder = v; // radians
                   lastDataTimestamp = Date.now();
