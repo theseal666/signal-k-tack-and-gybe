@@ -178,8 +178,12 @@ module.exports = function (app) {
 
     // If we haven't received fresh data recently, skip heavy computations
     if (!lastDataTimestamp || (now - lastDataTimestamp) > 2000) {
-      // still emit state but mark as stale
-      emitDelta('performance.maneuver.state', { state: currentState, stale: true });
+      // still emit state but mark as stale, include tack/angles for the UI
+      const twaDeg = currentTWA * 180.0 / Math.PI;
+      const awaDeg = currentAWA * 180.0 / Math.PI;
+      const stwKnots = msToKnots(currentSTW);
+      const tack = (awaDeg < 0) ? 'port' : 'starboard';
+      emitDelta('performance.maneuver.state', { state: currentState, stale: true, stwKnots: Number(stwKnots.toFixed(3)), twaDeg: Number(twaDeg.toFixed(2)), awaDeg: Number(awaDeg.toFixed(2)), tack: tack });
       return;
     }
 
@@ -218,7 +222,8 @@ module.exports = function (app) {
     // Pending logic: detect sign-cross of TWA
     if (currentState === 'Pending') {
       let timeInPending = (now - pendingStartTime) / 1000.0;
-      let historyEntry = rollingHistory[0] || { twa: twaDeg };
+      // Use the previous sample (second-last) to detect a recent sign change rather than the oldest buffer entry
+      let historyEntry = (rollingHistory.length >= 2) ? rollingHistory[rollingHistory.length - 2] : (rollingHistory[0] || { twa: twaDeg });
       let signChange = (historyEntry.twa < 0 && twaDeg > 0) || (historyEntry.twa > 0 && twaDeg < 0);
 
       if (signChange && Math.abs(twaDeg) < 15) {
@@ -293,12 +298,16 @@ module.exports = function (app) {
       }
     }
 
-    // emit live metrics for UI
+    // derive tack from apparent wind angle (AWA): negative = port, positive = starboard
+    const tack = (awaDeg < 0) ? 'port' : 'starboard';
+
+    // emit live metrics for UI, include tack and awaDeg so the dashboard can show correct side
     emitDelta('performance.maneuver.state', {
       state: currentState,
       stwKnots: Number(stwKnots.toFixed(3)),
       twaDeg: Number(twaDeg.toFixed(2)),
       awaDeg: Number(awaDeg.toFixed(2)),
+      tack: tack,
       vmgKnots: Number(vmgKnots.toFixed(3)),
       metersLostAccum: Number(metersLostAccum.toFixed(2))
     });
