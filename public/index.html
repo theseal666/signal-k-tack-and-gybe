@@ -37,8 +37,6 @@
     .ws-status { font-size: 0.9rem; color: #94a3b8; margin-left: 12px; }
     .ws-status.connected { color: #34d399; }
     .ws-status.disconnected { color: #f87171; }
-    .chart-controls { display:flex; gap:12px; align-items:center; margin-bottom:6px; }
-    .chart-controls label { font-size:0.85rem; color:#cbd5e1; }
   </style>
 </head>
 <body>
@@ -60,9 +58,7 @@
         <div class="metric-row"><span>State:</span><span id="valType" class="metric-value">-</span></div>
         <div class="metric-row"><span>STW:</span><span id="valSTW" class="metric-value">0.00 kn</span></div>
         <div class="metric-row"><span>VMG:</span><span id="valVMG" class="metric-value">0.00 kn</span></div>
-        <div class="metric-row"><span>TWA:</span><span id="valTWA" class="metric-value">0°</span></div>
         <div class="metric-row"><span>AWA:</span><span id="valAWA" class="metric-value">0°</span></div>
-        <div class="metric-row"><span>Heading:</span><span id="valHeading" class="metric-value">-</span></div>
         <div class="metric-row"><span>Rudder:</span><span id="valRudder" class="metric-value">0.0°</span></div>
         <div class="metric-row"><span>Meters Lost:</span><span id="valLost" style="color:#ef4444;" class="metric-value">0.0 m</span></div>
       </div>
@@ -70,11 +66,6 @@
 
     <div class="panel">
       <h2>Maneuver Graph Timeline</h2>
-      <div class="chart-controls">
-        <label><input id="showAWA" type="checkbox" checked> Show AWA</label>
-        <label><input id="showRudder" type="checkbox" checked> Show Rudder</label>
-        <label style="margin-left:auto; color:#94a3b8; font-size:0.85rem;">Markers: <span style="color:#34d399">TWA</span> <span style="color:#60a5fa">Heading</span></label>
-      </div>
       <div style="position: relative; height: 480px; width: 100%;">
         <canvas id="timelineChart"></canvas>
       </div>
@@ -118,13 +109,7 @@
     const awaData = Array(maxDataPoints).fill(0);
     const rudderData = Array(maxDataPoints).fill(0);
 
-    // smoothing window size
-    const SMOOTH_WINDOW = 5;
-
     let tackStartIndex = null; let recoveryEndIndex = null;
-
-    let latestTwaDeg = null; // for marker
-    let latestHeadingDeg = null; // for marker
 
     // Register annotation plugin if available and avoid double registration
     if (window.Chart && window['chartjs-plugin-annotation']) {
@@ -136,18 +121,6 @@
       } catch (e) {
         console.warn('Annotation register failed', e);
       }
-    }
-
-    function pushSmoothed(arr, rawVal) {
-      // compute average of last SMOOTH_WINDOW-1 values plus rawVal
-      const take = Math.min(SMOOTH_WINDOW - 1, arr.length);
-      let sum = rawVal;
-      for (let i = arr.length - take; i < arr.length; i++) {
-        if (i >= 0) sum += arr[i];
-      }
-      const avg = sum / (take + 1);
-      arr.push(Number(avg.toFixed(3)));
-      if (arr.length > maxDataPoints) arr.shift();
     }
 
     // Safe Chart initialization: guard against plugin/version issues and destroy any previous chart
@@ -175,15 +148,7 @@
           },
           plugins: {
             legend: { labels: { color: '#e2e8f0' } },
-            annotation: {
-              annotations: {
-                tackZone: { type: 'box', xMin: () => tackStartIndex, xMax: () => recoveryEndIndex, backgroundColor: 'rgba(245, 158, 11, 0.08)', borderColor: '#f59e0b', borderWidth: { left: 2, right: 2 } },
-                tackStart: { type: 'line', xMin: () => tackStartIndex, xMax: () => tackStartIndex, borderColor: '#60a5fa', borderWidth: 2 },
-                recoveryLine: { type: 'line', xMin: () => recoveryEndIndex, xMax: () => recoveryEndIndex, borderColor: '#34d399', borderWidth: 2 },
-                twaLine: { type: 'line', scaleID: 'yAwa', value: null, borderColor: '#fbbf24', borderWidth: 1, borderDash: [3,2], label: { enabled: true, content: 'TWA', position: 'start', backgroundColor: 'transparent', color: '#fbbf24' } },
-                headingLine: { type: 'line', scaleID: 'yAwa', value: null, borderColor: '#60a5fa', borderWidth: 1, borderDash: [2,2], label: { enabled: true, content: 'Heading', position: 'start', backgroundColor: 'transparent', color: '#60a5fa' } }
-              }
-            }
+            annotation: { annotations: { tackZone: { type: 'box', xMin: () => tackStartIndex, xMax: () => recoveryEndIndex, backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: '#f59e0b', bo[...]
           }
         };
 
@@ -201,14 +166,6 @@
           options: chartOptions
         });
         window._existingChart = chart;
-
-        // legend toggle checkboxes
-        document.getElementById('showAWA').addEventListener('change', (e) => {
-          const meta = chart.getDatasetMeta(2); meta.hidden = !e.target.checked; chart.update('none');
-        });
-        document.getElementById('showRudder').addEventListener('change', (e) => {
-          const meta = chart.getDatasetMeta(3); meta.hidden = !e.target.checked; chart.update('none');
-        });
       } else {
         console.warn('Chart canvas not available');
       }
@@ -255,15 +212,12 @@
       document.getElementById('wsStatus').classList.add('connected');
 
       ws.send(JSON.stringify({
-        // subscribe globally to ensure we receive instrument values too
+        context: "vessels.self",
         subscribe: [
           { path: "performance.maneuver", period: 100 },
           { path: "performance.maneuver.*", period: 100 },
           { path: "steering.rudderAngle", period: 100 },
-          { path: "environment.wind.angleApparent", period: 200 },
-          { path: "environment.wind.angleTrueWater", period: 500 },
-          { path: "navigation.headingTrue", period: 500 },
-          { path: "navigation.courseOverGroundTrue", period: 500 }
+          { path: "environment.wind.angleApparent", period: 200 }
         ]
       }));
     };
@@ -298,55 +252,27 @@
               const p = kv.path;
               const v = kv.value;
 
-              // Direct instrument paths
+              // handle direct instrument paths for live telemetry
               if (p === 'steering.rudderAngle') {
-                if (typeof v === 'number') {
-                  const rudderDeg = v * 180 / Math.PI;
+                const rudderDeg = (typeof v === 'number') ? (v * 180 / Math.PI) : null;
+                if (rudderDeg !== null) {
                   document.getElementById('valRudder').innerText = rudderDeg.toFixed(1) + '°';
-                  pushSmoothed(rudderData, rudderDeg);
+                  rudderData.push(rudderDeg); rudderData.shift();
                 }
                 return;
               }
 
               if (p === 'environment.wind.angleApparent') {
-                if (typeof v === 'number') {
-                  const awaDeg = Math.abs(v * 180 / Math.PI);
+                // preserve sign: angles in Signal K are radians; convert to degrees and keep negative for port tack
+                const awaDeg = (typeof v === 'number') ? (v * 180 / Math.PI) : null;
+                if (awaDeg !== null) {
                   document.getElementById('valAWA').innerText = awaDeg.toFixed(1) + '°';
-                  pushSmoothed(awaData, awaDeg);
-                  drawVessel(awaDeg);
+                  awaData.push(awaDeg); awaData.shift(); drawVessel(awaDeg);
                 }
                 return;
               }
 
-              if (p === 'environment.wind.angleTrueWater') {
-                if (typeof v === 'number') {
-                  latestTwaDeg = Number((v * 180 / Math.PI).toFixed(2));
-                  document.getElementById('valTWA').innerText = latestTwaDeg.toFixed(1) + '°';
-                  // update TWA marker
-                  if (chart && chart.options && chart.options.plugins && chart.options.plugins.annotation && chart.options.plugins.annotation.annotations && chart.options.plugins.annotation.annotations.twaLine) {
-                    chart.options.plugins.annotation.annotations.twaLine.value = latestTwaDeg;
-                    chart.update('none');
-                  }
-                }
-                return;
-              }
-
-              if (p === 'navigation.headingTrue' || p === 'navigation.courseOverGroundTrue') {
-                if (typeof v === 'number') {
-                  // normalize heading to -180..180
-                  let degVal = (v * 180 / Math.PI);
-                  if (degVal > 180) degVal -= 360;
-                  latestHeadingDeg = Number(degVal.toFixed(2));
-                  document.getElementById('valHeading').innerText = ( (latestHeadingDeg>=0?'+':'') + latestHeadingDeg.toFixed(1) + '°');
-                  if (chart && chart.options && chart.options.plugins && chart.options.plugins.annotation && chart.options.plugins.annotation.annotations && chart.options.plugins.annotation.annotations.headingLine) {
-                    chart.options.plugins.annotation.annotations.headingLine.value = latestHeadingDeg;
-                    chart.update('none');
-                  }
-                }
-                return;
-              }
-
-              // Handle aggregate performance.maneuver object
+              // Handle the case where plugin publishes a single 'performance.maneuver' object containing multiple fields
               if (p === 'performance.maneuver' && v && typeof v === 'object') {
                 Object.keys(v).forEach(subk => {
                   const pseudoPath = `performance.maneuver.${subk}`;
@@ -363,7 +289,6 @@
           });
         });
 
-        // advance annotation indices animation
         if (tackStartIndex !== null) tackStartIndex--;
         if (recoveryEndIndex !== null) recoveryEndIndex--;
         if (tackStartIndex < 0 && recoveryEndIndex < 0) { tackStartIndex = null; recoveryEndIndex = null; }
@@ -382,22 +307,14 @@
         if (v && typeof v === 'object') {
           if (typeof v.stwKnots === 'number') { document.getElementById('valSTW').innerText = v.stwKnots.toFixed(2) + ' kn'; stwData.push(v.stwKnots); stwData.shift(); }
           if (typeof v.vmgKnots === 'number') { document.getElementById('valVMG').innerText = v.vmgKnots.toFixed(2) + ' kn'; vmgData.push(v.vmgKnots); vmgData.shift(); }
-          if (typeof v.twaDeg === 'number') {
-            const twa = Number(v.twaDeg);
-            document.getElementById('valTWA').innerText = twa.toFixed(1) + '°';
-            latestTwaDeg = twa;
-            if (chart && chart.options && chart.options.plugins && chart.options.plugins.annotation && chart.options.plugins.annotation.annotations && chart.options.plugins.annotation.annotations.twaLine) {
-              chart.options.plugins.annotation.annotations.twaLine.value = latestTwaDeg;
-            }
-            // also push as AWA representation for chart
-            pushSmoothed(awaData, Math.abs(twa));
-          }
+          if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(v.twaDeg); awaData.shift(); drawVessel(v.twaDeg); }
           if (typeof v.metersLostAccum === 'number') document.getElementById('valLost').innerText = v.metersLostAccum.toFixed(1) + ' m';
-          if (typeof v.rudderDeg === 'number') { document.getElementById('valRudder').innerText = v.rudderDeg.toFixed(1) + '°'; pushSmoothed(rudderData, v.rudderDeg); }
+          // support optional embedded rudder in state
+          if (typeof v.rudderDeg === 'number') { document.getElementById('valRudder').innerText = v.rudderDeg.toFixed(1) + '°'; rudderData.push(v.rudderDeg); rudderData.shift(); }
         }
 
-        if (lastState === 'Ready' && stateVal === 'InTurn') { tackStartIndex = maxDataPoints - 1; if (chart && chart.options && chart.options.plugins && chart.options.plugins.annotation && chart.options.plugins.annotation.annotations && chart.options.plugins.annotation.annotations.tackStart) { chart.options.plugins.annotation.annotations.tackStart.xMin = tackStartIndex; chart.options.plugins.annotation.annotations.tackStart.xMax = tackStartIndex; } recoveryEndIndex = null; }
-        if (lastState === 'Recovery' && stateVal === 'Ready') { recoveryEndIndex = maxDataPoints - 1; if (chart && chart.options && chart.options.plugins && chart.options.plugins.annotation && chart.options.plugins.annotation.annotations && chart.options.plugins.annotation.annotations.recoveryLine) { chart.options.plugins.annotation.annotations.recoveryLine.xMin = recoveryEndIndex; chart.options.plugins.annotation.annotations.recoveryLine.xMax = recoveryEndIndex; } }
+        if (lastState === 'Ready' && stateVal === 'InTurn') { tackStartIndex = maxDataPoints - 1; recoveryEndIndex = null; }
+        if (lastState === 'Recovery' && stateVal === 'Ready') { recoveryEndIndex = maxDataPoints - 1; }
         lastState = stateVal;
       }
 
