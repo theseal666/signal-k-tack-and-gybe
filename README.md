@@ -15,7 +15,8 @@ A focused Signal K plugin to analyze tacks and gybes, produce precise summary me
 - `index.js` — Main plugin engine (subscription handling, analysis, ORC fetch, persistence)
 - `package.json` — Dependencies
 - `README.md` — Documentation
-- `public/index.html` — Optional dashboard (binds to emitted Signal K paths)
+- `public/index.html` — Optional dashboard (visualizes live emitted Signal K paths)
+- `install.sh` — Optional installer script (automates the recommended install into Signal K user folder)
 
 ## Signal K paths the plugin subscribes to
 
@@ -30,8 +31,36 @@ These paths must be provided by live instruments or your external sim plugin (nu
 ## Emitted Signal K delta paths
 
 - `performance.maneuver.state` — { state, stwKnots, twaDeg, vmgKnots, stale?, metersLostAccum }
+- `performance.maneuver.metersLost` — Number or object with metersLost
+- `performance.maneuver.liveStwKnots` — Number (knots)
+- `performance.maneuver.liveVmgKnots` — Number (knots)
+- `performance.maneuver.liveAwaDegrees` — Number (degrees)
 - `performance.maneuver.lastSummary` — Detailed summary object when a maneuver closes
 - `performance.maneuver.database` — Rolling averages and Top‑10 leaderboard
+
+## Web Dashboard (public/index.html)
+
+The plugin includes a small web dashboard in `public/index.html`. It visualizes live maneuver state, STW/VMG/ AWA graphs, the last maneuver analysis and a Top‑10 leaderboard.
+
+What it shows
+
+- Live status badge: Ready / InTurn / Recovery and live telemetry (STW, VMG, AWA, meters lost).
+- Timeline chart: recent STW, VMG and AWA history.
+- Last Maneuver Analysis card with meters lost, VMG gap, recovery time, min/max STW, overturn and dead‑zone time.
+- Fleet averages and Top‑10 leaderboard (fewest meters lost).
+
+How it connects
+
+- The dashboard opens a WebSocket to the Signal K stream endpoint: `/signalk/v1/stream` and subscribes to `performance.maneuver.*` updates.
+- By default it assumes the dashboard is served from the same host as the Signal K server (same origin). If you host the static file elsewhere, edit `public/index.html` and change the `wsUrl` variable to `ws://<SIGNALK_HOST>:3000/signalk/v1/stream?subscribe=none` (or `wss://` for TLS).
+
+Quick local test (one-liner)
+
+- Serve the `public` folder locally for a quick test (requires `npm`):
+
+  npx http-server public -p 8080
+
+  Then open http://localhost:8080 in your browser. If the dashboard shows no data, point `wsUrl` to your Signal K server address.
 
 ## Precision & metric details
 
@@ -51,35 +80,6 @@ These paths must be provided by live instruments or your external sim plugin (nu
 - `orcUrl` — optional URL to ORC/RMS JSON polar file
 - `targetSpeedKnots` — fallback / manual polar target (knots)
 - `recoveryThreshold` — percentage (0–100) of entry speed to consider maneuver recovered (default 95)
-
-## Operational notes & testing
-
-- The plugin is source‑agnostic — ensure your external sim plugin publishes exactly the same paths with numeric values (not strings).
-- If no fresh data (>2s), the analysis loop marks state `stale` and avoids false detections.
-- To test without instruments:
-  1. Run your sim plugin that publishes the required Signal K paths.
-  2. Start this analyzer plugin.
-  3. Confirm `performance.maneuver.state` deltas appear and `tack-history.json` receives summaries when maneuvers close.
-
-## Example `performance.maneuver.lastSummary` schema
-
-```json
-{
-  "type": "Tack",
-  "timestamp": "2026-06-20T19:52:25.000Z",
-  "metersLost": 3.4,
-  "recoveryDurationSec": 8.2,
-  "minStwKnots": 4.12,
-  "maxOverturnTWA": 12.3,
-  "timeInDeadZoneSec": 1.42,
-  "actualDistanceMeters": 5.23,
-  "theoreticalDistanceMeters": 8.12,
-  "actualVmgDistanceMeters": 2.34,
-  "theoreticalVmgDistanceMeters": 3.45
-}
-```
-
----
 
 ## Easy install (for sailors / non‑technical users)
 
@@ -128,7 +128,7 @@ Use this if you want to develop or prefer a linked installation.
 
 2. Link it globally and into the Signal K installation:
 
-   sudo npm link          # creates a global symlink for this package
+   sudo npm link
 
    # Find where your signalk server is installed, then in that folder run:
    # sudo npm link signal-k-tack-and-gybe
@@ -167,4 +167,20 @@ If something goes wrong
 
 ---
 
-If you want, I can add a short shell script (install.sh) that automates Method A (clone, npm install, copy, restart). Would you like me to add that script to the repo?
+## Quick install script one-liners (optional)
+
+Interactive (prompts before running):
+
+curl -fsSL https://raw.githubusercontent.com/theseal666/Signal-k-tack-and-gybe/main/install.sh | bash
+
+Non-interactive (auto yes):
+
+curl -fsSL https://raw.githubusercontent.com/theseal666/Signal-k-tack-and-gybe/main/install.sh | bash -s -- --yes
+
+If curl is not available, use wget:
+
+wget -qO- https://raw.githubusercontent.com/theseal666/Signal-k-tack-and-gybe/main/install.sh | bash
+
+---
+
+If you want more screenshots, a compact mobile UI, or a small harness to replay example delta payloads for demo/testing, tell me and I'll add them.
