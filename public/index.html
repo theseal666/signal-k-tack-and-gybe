@@ -148,7 +148,18 @@
           },
           plugins: {
             legend: { labels: { color: '#e2e8f0' } },
-            annotation: { annotations: { tackZone: { type: 'box', xMin: () => tackStartIndex, xMax: () => recoveryEndIndex, backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: '#f59e0b', bo[...]
+            annotation: {
+              annotations: {
+                tackZone: {
+                  type: 'box',
+                  xMin: () => tackStartIndex,
+                  xMax: () => recoveryEndIndex,
+                  backgroundColor: 'rgba(245, 158, 11, 0.12)',
+                  borderColor: '#f59e0b',
+                  borderWidth: 1
+                }
+              }
+            }
           }
         };
 
@@ -201,6 +212,7 @@
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/signalk/v1/stream?subscribe=none`;
     console.debug('Connecting WS to', wsUrl);
+    try { const wsElem = document.getElementById('wsStatus'); if (wsElem) wsElem.innerText = 'WS: connecting to ' + wsUrl; } catch(e){}
     const ws = new WebSocket(wsUrl);
     let lastState = 'Ready';
     let msgCount = 0;
@@ -263,8 +275,7 @@
               }
 
               if (p === 'environment.wind.angleApparent') {
-                // preserve sign: angles in Signal K are radians; convert to degrees and keep negative for port tack
-                const awaDeg = (typeof v === 'number') ? (v * 180 / Math.PI) : null;
+                const awaDeg = (typeof v === 'number') ? (Math.abs(v * 180 / Math.PI)) : null;
                 if (awaDeg !== null) {
                   document.getElementById('valAWA').innerText = awaDeg.toFixed(1) + '°';
                   awaData.push(awaDeg); awaData.shift(); drawVessel(awaDeg);
@@ -307,7 +318,7 @@
         if (v && typeof v === 'object') {
           if (typeof v.stwKnots === 'number') { document.getElementById('valSTW').innerText = v.stwKnots.toFixed(2) + ' kn'; stwData.push(v.stwKnots); stwData.shift(); }
           if (typeof v.vmgKnots === 'number') { document.getElementById('valVMG').innerText = v.vmgKnots.toFixed(2) + ' kn'; vmgData.push(v.vmgKnots); vmgData.shift(); }
-          if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(v.twaDeg); awaData.shift(); drawVessel(v.twaDeg); }
+          if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(Math.abs(v.twaDeg)); awaData.shift(); drawVessel(v.twaDeg); }
           if (typeof v.metersLostAccum === 'number') document.getElementById('valLost').innerText = v.metersLostAccum.toFixed(1) + ' m';
           // support optional embedded rudder in state
           if (typeof v.rudderDeg === 'number') { document.getElementById('valRudder').innerText = v.rudderDeg.toFixed(1) + '°'; rudderData.push(v.rudderDeg); rudderData.shift(); }
