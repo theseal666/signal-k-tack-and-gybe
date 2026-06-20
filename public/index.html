@@ -167,50 +167,83 @@
 
       msg.updates.forEach(update => {
         update.values.forEach(kv => {
-          if (kv.path === 'performance.maneuver.state') {
-            document.getElementById('maneuverState').innerText = kv.value;
-            document.getElementById('maneuverState').className = `status-badge state-${kv.value}`;
-            if (lastState === 'Ready' && kv.value === 'InTurn') { tackStartIndex = maxDataPoints - 1; recoveryEndIndex = null; }
-            if (lastState === 'Recovery' && kv.value === 'Ready') { recoveryEndIndex = maxDataPoints - 1; }
-            lastState = kv.value;
-          }
-          if (kv.path === 'performance.maneuver.type') document.getElementById('valType').innerText = kv.value;
-          if (kv.path === 'performance.maneuver.metersLost') document.getElementById('valLost').innerText = kv.value.toFixed(1) + " m";
-          if (kv.path === 'performance.maneuver.liveStwKnots') { document.getElementById('valSTW').innerText = kv.value.toFixed(2) + " kn"; stwData.push(kv.value); stwData.shift(); }
-          if (kv.path === 'performance.maneuver.liveVmgKnots') { document.getElementById('valVMG').innerText = kv.value.toFixed(2) + " kn"; vmgData.push(kv.value); vmgData.shift(); }
-          if (kv.path === 'performance.maneuver.liveAwaDegrees') { document.getElementById('valAWA').innerText = kv.value.toFixed(1) + "°"; awaData.push(kv.value); awaData.shift(); drawVessel(kv.value); }
-          
-          // Capture Analysis Summaries
-          if (kv.path === 'performance.maneuver.lastSummary') {
-            const s = kv.value;
-            document.getElementById('cardLost').innerText = s.metersLost + " m";
-            document.getElementById('cardVmgLost').innerText = s.vmgMetersLost + " m";
-            document.getElementById('cardRecTime').innerText = s.recoveryDurationSec + " s";
-            document.getElementById('cardStwMinMax').innerText = `${s.minStwKnots} / ${s.maxStwKnots} kn`;
-            document.getElementById('cardVmgStartMax').innerText = `${s.entryVmgKnots} / ${s.maxVmgKnots} kn`;
-            document.getElementById('cardOverturn').innerText = s.overturnDegrees + "°";
-            document.getElementById('cardFlapTime').innerText = s.deadZoneSec + " s";
-          }
+          // Many values are objects. Handle both object and primitive payloads robustly.
+          try {
+            const p = kv.path;
+            const v = kv.value;
 
-          // Capture Database Updates
-          if (kv.path === 'performance.maneuver.database') {
-            const db = kv.value;
-            document.getElementById('avgCount').innerText = db.totalTacksLogged;
-            document.getElementById('avgLost').innerText = db.averages.metersLost + " m";
-            document.getElementById('avgRecTime').innerText = db.averages.recoveryDurationSec + " s";
-            document.getElementById('avgMinStw').innerText = db.averages.minStwKnots + " kn";
+            if (p === 'performance.maneuver.state') {
+              const stateVal = (v && typeof v === 'object' && 'state' in v) ? v.state : v;
+              document.getElementById('maneuverState').innerText = stateVal || 'Ready';
+              document.getElementById('maneuverState').className = `status-badge state-${stateVal || 'Ready'}`;
 
-            // Render Leaderboard Rows Dynamically
-            let html = '';
-            db.topTenBests.forEach((t, i) => {
-              let cls = i === 0 ? 'class="gold"' : '';
-              html += `<tr ${cls}><td>${i+1}</td><td>${t.metersLost}m</td><td>${t.recoveryDurationSec}s</td><td>${t.overturnDegrees}°</td></tr>`;
-            });
-            document.getElementById('leaderboardBody').innerHTML = html || '<tr><td colspan="4">No data logged</td></tr>';
+              // also handle embedded live metrics if present (stwKnots, vmgKnots, twaDeg)
+              if (v && typeof v === 'object') {
+                if (typeof v.stwKnots === 'number') { document.getElementById('valSTW').innerText = v.stwKnots.toFixed(2) + ' kn'; stwData.push(v.stwKnots); stwData.shift(); }
+                if (typeof v.vmgKnots === 'number') { document.getElementById('valVMG').innerText = v.vmgKnots.toFixed(2) + ' kn'; vmgData.push(v.vmgKnots); vmgData.shift(); }
+                if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(v.twaDeg); awaData.shift(); drawVessel(v.twaDeg); }
+                if (typeof v.metersLostAccum === 'number') document.getElementById('valLost').innerText = v.metersLostAccum.toFixed(1) + ' m';
+              }
+
+              if (lastState === 'Ready' && stateVal === 'InTurn') { tackStartIndex = maxDataPoints - 1; recoveryEndIndex = null; }
+              if (lastState === 'Recovery' && stateVal === 'Ready') { recoveryEndIndex = maxDataPoints - 1; }
+              lastState = stateVal;
+            }
+
+            if (p === 'performance.maneuver.type') {
+              document.getElementById('valType').innerText = (v && typeof v === 'object' && v.type) ? v.type : v;
+            }
+
+            if (p === 'performance.maneuver.metersLost') {
+              const val = (v && typeof v === 'object' && typeof v.metersLost === 'number') ? v.metersLost : (typeof v === 'number' ? v : null);
+              if (val !== null) document.getElementById('valLost').innerText = val.toFixed(1) + ' m';
+            }
+
+            // Capture Analysis Summaries
+            if (p === 'performance.maneuver.lastSummary') {
+              const s = v;
+              if (s && typeof s === 'object') {
+                document.getElementById('cardLost').innerText = (s.metersLost || 0) + ' m';
+                // VMG meters lost isn't currently written by the plugin; show actualVmgDistanceMeters gap instead
+                const vmgLost = (s.theoreticalVmgDistanceMeters && s.actualVmgDistanceMeters) ? (s.theoreticalVmgDistanceMeters - s.actualVmgDistanceMeters).toFixed(2) : '-';
+                document.getElementById('cardVmgLost').innerText = (vmgLost === '-') ? '-' : vmgLost + ' m';
+                document.getElementById('cardRecTime').innerText = (s.recoveryDurationSec || '-') + ' s';
+                document.getElementById('cardStwMinMax').innerText = `${(s.minStwKnots||'-')} / ${(s.maxStwKnots||'-')} kn`;
+                document.getElementById('cardVmgStartMax').innerText = `${(s.actualVmgDistanceMeters||'-')} / ${(s.theoreticalVmgDistanceMeters||'-')} m`;
+                document.getElementById('cardOverturn').innerText = (s.maxOverturnTWA || '-') + '°';
+                document.getElementById('cardFlapTime').innerText = (s.timeInDeadZoneSec || '-') + ' s';
+              }
+            }
+
+            // Capture Database Updates
+            if (p === 'performance.maneuver.database') {
+              const db = v;
+              if (db && typeof db === 'object') {
+                document.getElementById('avgCount').innerText = db.totalTacksLogged || 0;
+                document.getElementById('avgLost').innerText = (db.averages && db.averages.metersLost) ? (db.averages.metersLost + ' m') : '-';
+                document.getElementById('avgRecTime').innerText = (db.averages && db.averages.recoveryDurationSec) ? (db.averages.recoveryDurationSec + ' s') : '-';
+                document.getElementById('avgMinStw').innerText = (db.averages && db.averages.minStwKnots) ? (db.averages.minStwKnots + ' kn') : '-';
+
+                // Render Leaderboard Rows Dynamically
+                let html = '';
+                (db.topTenBests || []).forEach((t, i) => {
+                  let cls = i === 0 ? 'class="gold"' : '';
+                  const lost = t.metersLost != null ? t.metersLost + 'm' : '-';
+                  const rec = t.recoveryDurationSec != null ? t.recoveryDurationSec + 's' : '-';
+                  const ov = t.maxOverturnTWA != null ? t.maxOverturnTWA + '°' : '-';
+                  html += `<tr ${cls}><td>${i+1}</td><td>${lost}</td><td>${rec}</td><td>${ov}</td></tr>`;
+                });
+                document.getElementById('leaderboardBody').innerHTML = html || '<tr><td colspan="4">No data logged</td></tr>';
+              }
+            }
+
+          } catch (e) {
+            console.error('Dashboard message processing error', e);
           }
         });
       });
 
+      // advance animation indices
       if (tackStartIndex !== null) tackStartIndex--;
       if (recoveryEndIndex !== null) recoveryEndIndex--;
       if (tackStartIndex < 0 && recoveryEndIndex < 0) { tackStartIndex = null; recoveryEndIndex = null; }
