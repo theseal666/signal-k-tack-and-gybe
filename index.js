@@ -1,132 +1,135 @@
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios'); // Ensure axios is available for network lookups
+const axios = require('axios'); // network lookups
 
 module.exports = function (app) {
   const plugin = {};
   let unsubscribes = [];
-  let simInterval = null;
+  let analysisInterval = null;
   let options = {};
-  
+
   let historyFilePath = '';
 
   plugin.id = 'signal-k-tack-and-gybe';
   plugin.name = 'Tack and Gybe Performance Analyzer';
   plugin.description = 'Advanced performance logger with persistent Top 10 database, rolling historical buffer, and automatic ORC Polar integrations.';
 
-  const BUFFER_SIZE = 50; 
+  const BUFFER_SIZE = 120; // keep more points for timeline
   let rollingHistory = [];
-  
-  let currentState = 'Straight'; 
-  let maneuverType = 'Straight';
-  let startTime = 0;
-  let pendingStartTime = 0;
-  let accelerationStartTime = 0; 
-  
-  let snapshotEntrySTW = 0; // knots
-  let snapshotEntryVMG = 0; // knots
-  let snapshotEntryTWA = 0; // degrees
-  
-  let minSTW = 99; let maxSTW = 0;
-  let minVMG = 99; let maxVMG = 0;
-  let maxOverturnTWA = 0; 
-  let timeInDeadZone = 0; 
 
-  let actualDistanceMeters = 0; let theoreticalDistanceMeters = 0;
-  let actualVmgDistanceMeters = 0; let theoreticalVmgDistanceMeters = 0;
+  // runtime state
+  let currentState = 'Straight'; // Straight | Pending | InTurn | Recovery
+  let maneuverType = 'Straight';
+
+  // timestamps
+  let entryTimestamp = null; // ms
+  let inTurnTimestamp = null;
+  let recoveryStartTimestamp = null;
+
+  // snapshot entry values (knots/degrees)
+  let snapshotEntrySTW = null; // knots
+  let snapshotEntryVMG = null; // knots
+  let snapshotEntryAWA = null; // degrees (abs off wind)
+
+  // running stats
+  let minSTW = 999, maxSTW = 0;
+  let minVMG = 999, maxVMG = -999;
+  let maxOverturnTWA = 0;
+  let timeInDeadZone = 0; // seconds
+
+  // integrators (meters)
+  let actualDistanceMeters = 0;
+  let theoreticalDistanceMeters = 0;
+  let actualVmgDistanceMeters = 0;
+  let theoreticalVmgDistanceMeters = 0;
   let metersLostAccum = 0;
 
-  // Live inputs (currentSTW is in m/s, others in radians or m/s as applicable)
-  let currentSTW = 4.01;   
-  let currentTWA = -0.698; 
-  let currentAWA = -0.488; 
-  let currentRudder = 0.0; 
-  let currentTWS = 6.17;   // m/s
+  // last received inputs (from subscriptions)
+  let currentSTW = 0; // m/s
+  let currentTWA = 0; // radians
+  let currentAWA = 0; // radians
+  let currentRudder = 0; // radians
+  let currentTWS = 0; // m/s
 
-  let orcTargetSTW = 7.80; 
-
+  // ORC / targets
+  let orcTargetSTW = 7.8; // knots fallback
   let globalRecoveryMultiplier = 0.95;
 
   let lastAnalysisTime = Date.now();
-  let lastDataTimestamp = 0; // updated when we receive valid data
+  let lastDataTimestamp = 0;
 
   let performanceDatabase = {
     totalTacksLogged: 0,
     averages: { metersLost: 0, recoveryDurationSec: 0, minStwKnots: 0 },
-    topTenBests: [] 
+    topTenBests: []
   };
 
-  // --- Helpers ---
-  const knotsToMS = k => k * 0.514444;
-  const msToKnots = m => m * 1.94384;
+  // helpers
+  const knotsToMS = k => Number(k) * 0.514444;
+  const msToKnots = m => Number(m) * 1.943844492;
+  const deg = r => Number(r) * 180 / Math.PI;
 
   function safeNumber(v) {
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
   }
 
-  // Load/Save history
+  // load/save DB
   function loadHistoryDatabase() {
     try {
       if (historyFilePath && fs.existsSync(historyFilePath)) {
         const fileData = fs.readFileSync(historyFilePath, 'utf8');
-        performanceDatabase = JSON.parse(fileData);
+        const parsed = JSON.parse(fileData);
+        if (parsed && typeof parsed === 'object') performanceDatabase = parsed;
       }
-    } catch (e) {
-      app.error('Failed to parse history database: ' + e.message);
-    }
+    } catch (e) { app.error('Failed to parse history database: ' + e.message); }
   }
 
   function saveHistoryDatabase() {
     try {
       if (!historyFilePath) return;
       fs.writeFileSync(historyFilePath, JSON.stringify(performanceDatabase, null, 2), 'utf8');
-    } catch (e) {
-      app.error('Failed to write history database: ' + e.message);
-    }
+    } catch (e) { app.error('Failed to write history database: ' + e.message); }
   }
 
-  // Fetch ORC polar targets using axios with timeout
   async function fetchOrcPolarTargets(url) {
     try {
-      app.debug(`Querying ORC database for certificate profiles: ${url}`);
+      app.debug(`Querying ORC database for polar: ${url}`);
       const response = await axios.get(url, { timeout: 5000 });
       if (response.data && response.data.rms) {
         options.polarData = response.data.rms;
         resolveLivePolarTargets();
-        app.debug('ORC polar data curves populated successfully.');
+        app.debug('ORC polar data loaded.');
       }
     } catch (err) {
-      app.error('ORC API retrieval failed, defaulting to backup parameters: ' + (err && err.message));
-      orcTargetSTW = options.targetSpeedKnots || 7.80;
+      app.error('ORC API retrieval failed: ' + (err && err.message));
+      orcTargetSTW = options.targetSpeedKnots || orcTargetSTW;
     }
   }
 
   function resolveLivePolarTargets() {
     if (!options.polarData) return;
-    let twsKnots = msToKnots(currentTWS);
     try {
-      let vpp = options.polarData;
-      if (vpp.vmgUpwind && Array.isArray(vpp.vmgUpwind) && vpp.vmgUpwind.length) {
-        // Find first item where twsKnots <= item.tws, fallback to last
-        let target = vpp.vmgUpwind.find(item => twsKnots <= item.tws) || vpp.vmgUpwind[vpp.vmgUpwind.length - 1];
+      const twsKnots = msToKnots(currentTWS);
+      const vpp = options.polarData;
+      if (vpp && vpp.vmgUpwind && vpp.vmgUpwind.length) {
+        const target = vpp.vmgUpwind.find(item => twsKnots <= item.tws) || vpp.vmgUpwind[vpp.vmgUpwind.length - 1];
         if (target) orcTargetSTW = target.vboat || options.targetSpeedKnots || orcTargetSTW;
       }
-    } catch (e) { app.error('Error resolving ORC polar matrix: ' + e.message); }
+    } catch (e) { app.error('Error resolving ORC polar: ' + e.message); }
   }
 
   function emitDelta(path, value) {
     try {
-      app.handleMessage(plugin.id, {
-        updates: [{ values: [{ path: path, value: value }] }]
-      });
+      app.handleMessage(plugin.id, { updates: [{ values: [{ path, value }] }] });
     } catch (e) { /* non-fatal */ }
   }
 
-  function logTackToDatabase(summary) {
+  function persistSummary(summary) {
+    // push summary to DB and write file
     let db = performanceDatabase;
-    db.totalTacksLogged++;
-    let n = db.totalTacksLogged;
+    db.totalTacksLogged = (db.totalTacksLogged || 0) + 1;
+    const n = db.totalTacksLogged;
     if (n === 1) {
       db.averages = { metersLost: summary.metersLost, recoveryDurationSec: summary.recoveryDurationSec, minStwKnots: summary.minStwKnots };
     } else {
@@ -134,183 +137,214 @@ module.exports = function (app) {
       db.averages.recoveryDurationSec = Number(((db.averages.recoveryDurationSec * (n - 1) + summary.recoveryDurationSec) / n).toFixed(1));
       db.averages.minStwKnots = Number(((db.averages.minStwKnots * (n - 1) + summary.minStwKnots) / n).toFixed(2));
     }
+    db.topTenBests = db.topTenBests || [];
     db.topTenBests.push(summary);
-    db.topTenBests.sort((a, b) => a.metersLost - b.metersLost);
+    db.topTenBests.sort((a, b) => (a.metersLost - b.metersLost));
     if (db.topTenBests.length > 10) db.topTenBests.pop();
     saveHistoryDatabase();
+
+    // emit both summary and database
     emitDelta('performance.maneuver.lastSummary', summary);
+    emitDelta('performance.maneuver.database', db);
   }
 
-  // Note: This plugin must be agnostic to the data source. It should NOT run an internal simulation.
-  // It processes whatever data arrives via app.subscriptionmanager (either instrument feeds or a separate sim plugin publishing the same paths).
+  // Maneuver snapshot helper
+  function makeSnapshot(ts, stw_ms, twa_rad, awa_rad) {
+    const stw_k = msToKnots(stw_ms);
+    const twa_deg = deg(twa_rad);
+    const awa_deg = Math.abs(deg(awa_rad));
+    const vmg_ms = stw_ms * Math.cos(Math.abs(twa_rad));
+    const vmg_k = msToKnots(vmg_ms);
+    return { ts, stw_ms, stw_k: Number(stw_k.toFixed(3)), twa_deg: Number(twa_deg.toFixed(2)), awa_deg: Number(awa_deg.toFixed(2)), vmg_ms, vmg_k: Number(vmg_k.toFixed(3)) };
+  }
 
+  // Engine: runs analysis frequently and manages state machine and integrators
   function startEngineLoop(recoveryMultiplier) {
-    globalRecoveryMultiplier = recoveryMultiplier || 0.95;
-    if (simInterval) clearInterval(simInterval);
-
-    // Run analysis periodically but do NOT mutate current* variables here. The data must come from
-    // the Signal K subscription (real instruments) or a separate sim plugin that publishes the same paths.
+    globalRecoveryMultiplier = recoveryMultiplier || globalRecoveryMultiplier;
+    if (analysisInterval) clearInterval(analysisInterval);
     lastAnalysisTime = Date.now();
-    simInterval = setInterval(() => {
-      try {
-        runAnalysisPipeline(orcTargetSTW, globalRecoveryMultiplier);
-      } catch (e) {
-        app.error('Engine loop error: ' + e.message);
-      }
+    analysisInterval = setInterval(() => {
+      try { runAnalysisPipeline(globalRecoveryMultiplier); } catch (e) { app.error('Engine loop error: ' + (e && e.message)); }
     }, 200);
   }
 
-  function runAnalysisPipeline(activeTargetSTW, recoveryMultiplier) {
+  // State machine parameters (tweakable)
+  const CFG = {
+    turnStartDeltaDeg: 5, // minimal steering induced AWA change to consider starting a turn
+    pendingMaxSec: 10,
+    crossThresholdDeg: 15, // threshold near 0deg to consider crossing
+    settleAngleDeg: 8, // considered settled on new tack
+    recoveryThreshold: 0.95, // fraction of entry STW to consider recovered
+    deadZoneDeg: 20,
+    minSpeedKnots: 0.5,
+    minInturnSec: 0.3,
+    maxManeuverSec: 300
+  };
+
+  // runtime maneuver buffer (snapshots)
+  let maneuverSnapshots = [];
+
+  function resetManeuverState() {
+    entryTimestamp = null; inTurnTimestamp = null; recoveryStartTimestamp = null;
+    snapshotEntrySTW = null; snapshotEntryVMG = null; snapshotEntryAWA = null;
+    minSTW = 999; maxSTW = 0; minVMG = 999; maxVMG = -999; maxOverturnTWA = 0; timeInDeadZone = 0;
+    actualDistanceMeters = 0; theoreticalDistanceMeters = 0; actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0; metersLostAccum = 0;
+    maneuverSnapshots = [];
+  }
+
+  function runAnalysisPipeline(recoveryMultiplier) {
     const now = Date.now();
     let dt = (now - lastAnalysisTime) / 1000.0;
-    if (!Number.isFinite(dt) || dt <= 0) dt = 0.2; // fallback
+    if (!Number.isFinite(dt) || dt <= 0) dt = 0.2;
     lastAnalysisTime = now;
 
-    // If we haven't received fresh data recently, skip heavy computations
-    if (!lastDataTimestamp || (now - lastDataTimestamp) > 2000) {
-      // still emit state but mark as stale
+    // if no recent data, emit stale state and return
+    if (!lastDataTimestamp || (now - lastDataTimestamp) > 3000) {
       emitDelta('performance.maneuver.state', { state: currentState, stale: true });
       return;
     }
 
-    // currentSTW is m/s -> convert to knots for comparisons where needed
-    const stwKnots = msToKnots(currentSTW);
-    const twaDeg = currentTWA * 180.0 / Math.PI;
-    const awaDeg = currentAWA * 180.0 / Math.PI;
-    const rudderDeg = currentRudder * 180.0 / Math.PI;
+    // compute current live metrics
+    const stw_ms = currentSTW;
+    const stw_kn = msToKnots(stw_ms);
+    const twa_deg = deg(currentTWA);
+    const awa_deg = Math.abs(deg(currentAWA));
+    const vmg_ms = stw_ms * Math.cos(Math.abs(currentTWA));
+    const vmg_kn = msToKnots(vmg_ms);
 
-    const liveVmgMS = currentSTW * Math.cos(currentTWA); // m/s
-    const vmgKnots = msToKnots(liveVmgMS);
+    // push to rolling history
+    rollingHistory.push({ ts: now, stw_kn: Number(stw_kn.toFixed(3)), vmg_kn: Number(vmg_kn.toFixed(3)), twa_deg: Number(twa_deg.toFixed(2)) });
+    if (rollingHistory.length > BUFFER_SIZE) rollingHistory.shift();
 
-    // Maintain rolling history for look-back snapshots
-    if (currentState === 'Straight' || currentState === 'Pending') {
-      rollingHistory.push({ stw: Number(stwKnots.toFixed(3)), vmg: Number(vmgKnots.toFixed(3)), twa: Number(twaDeg.toFixed(2)), ts: now });
-      if (rollingHistory.length > BUFFER_SIZE) rollingHistory.shift();
-    }
-
-    // Entry detection
+    // ENTRY detection: from Straight -> Pending
     if (currentState === 'Straight') {
-      if (Math.abs(rudderDeg) > 5 && Math.abs(twaDeg) < 32) {
+      // start turning when rudder or AWA deviation is seen and speed is sufficient
+      const recent = rollingHistory[0] || { stw_kn, vmg_kn, twa_deg };
+      const awaDeviation = Math.abs(awa_deg - (snapshotEntryAWA || awa_deg));
+      // simple heuristic: significant rudder or AWA change
+      if ((Math.abs(deg(currentRudder)) > 6 || Math.abs(twa_deg - recent.twa_deg) > CFG.turnStartDeltaDeg) && stw_kn >= CFG.minSpeedKnots) {
         currentState = 'Pending';
-        pendingStartTime = now;
-        let historicalBase = rollingHistory[0] || { stw: stwKnots, vmg: vmgKnots, twa: twaDeg };
-        snapshotEntrySTW = historicalBase.stw; // knots
-        snapshotEntryVMG = historicalBase.vmg; // knots
-        snapshotEntryTWA = Math.abs(historicalBase.twa); // degrees
-        maxOverturnTWA = 0;
-        timeInDeadZone = 0;
-        metersLostAccum = 0;
-        actualDistanceMeters = 0; theoreticalDistanceMeters = 0;
-        actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0;
+        entryTimestamp = now;
+        // snapshot base from the median of rolling history (use earliest for consistency)
+        const base = rollingHistory[Math.max(0, rollingHistory.length - 1 - Math.floor(BUFFER_SIZE/4))] || recent;
+        snapshotEntrySTW = base.stw_kn;
+        snapshotEntryVMG = base.vmg_kn;
+        snapshotEntryAWA = Math.abs(base.twa_deg);
+        maneuverSnapshots = [];
+        // reset integrators
+        minSTW = stw_kn; maxSTW = stw_kn; minVMG = vmg_kn; maxVMG = vmg_kn; maxOverturnTWA = 0; timeInDeadZone = 0;
+        actualDistanceMeters = 0; theoreticalDistanceMeters = 0; actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0; metersLostAccum = 0;
       }
     }
 
-    // Pending logic: detect sign-cross of TWA
+    // PENDING -> InTurn detection
     if (currentState === 'Pending') {
-      let timeInPending = (now - pendingStartTime) / 1000.0;
-      let historyEntry = rollingHistory[0] || { twa: twaDeg };
-      let signChange = (historyEntry.twa < 0 && twaDeg > 0) || (historyEntry.twa > 0 && twaDeg < 0);
-
-      if (signChange && Math.abs(twaDeg) < 15) {
+      const timeInPending = (now - entryTimestamp) / 1000.0;
+      const oldest = rollingHistory[0] || { twa_deg };
+      const signChange = (oldest.twa_deg < 0 && twa_deg > 0) || (oldest.twa_deg > 0 && twa_deg < 0);
+      if (signChange || Math.abs(twa_deg) < CFG.crossThresholdDeg) {
         currentState = 'InTurn';
+        inTurnTimestamp = now;
         maneuverType = 'Tack';
-        startTime = now;
-        minSTW = stwKnots; maxSTW = stwKnots;
-        minVMG = vmgKnots; maxVMG = vmgKnots;
-        // initialize integration accumulators already done at entry
-      } else if (timeInPending > 10.0 || Math.abs(twaDeg) > 35) {
+        // ensure snapshotEntry values initialized
+        if (!snapshotEntrySTW) snapshotEntrySTW = stw_kn;
+        if (!snapshotEntryVMG) snapshotEntryVMG = vmg_kn;
+      } else if (timeInPending > CFG.pendingMaxSec || Math.abs(twa_deg) > 60) {
+        // abort false alarm
         currentState = 'Straight';
+        resetManeuverState();
       }
     }
 
-    // During InTurn/Recovery we integrate distance, VMG and track min/max
+    // INTURN / RECOVERY processing: integrate and watch for recovery
     if (currentState === 'InTurn' || currentState === 'Recovery') {
-      // update min/max
-      minSTW = Math.min(minSTW, stwKnots);
-      maxSTW = Math.max(maxSTW, stwKnots);
-      minVMG = Math.min(minVMG, vmgKnots);
-      maxVMG = Math.max(maxVMG, vmgKnots);
-
-      // update overturn: how much absolute TWA exceeded the original entry TWA (heuristic)
-      const overturn = Math.max(0, Math.abs(twaDeg) - snapshotEntryTWA);
+      // update stats
+      minSTW = Math.min(minSTW, stw_kn); maxSTW = Math.max(maxSTW, stw_kn);
+      minVMG = Math.min(minVMG, vmg_kn); maxVMG = Math.max(maxVMG, vmg_kn);
+      const overturn = Math.max(0, Math.abs(twa_deg) - (snapshotEntryAWA || 0));
       if (overturn > maxOverturnTWA) maxOverturnTWA = overturn;
+      if (awa_deg < CFG.deadZoneDeg) timeInDeadZone += dt;
 
-      // dead zone: when TWA under 20 degrees (sails luffing)
-      if (Math.abs(twaDeg) < 20) timeInDeadZone += dt;
+      // integrate distances
+      actualDistanceMeters += stw_ms * dt;
+      theoreticalDistanceMeters += knotsToMS(snapshotEntrySTW || stw_kn) * dt;
+      actualVmgDistanceMeters += vmg_ms * dt;
+      theoreticalVmgDistanceMeters += knotsToMS(snapshotEntryVMG || vmg_kn) * dt;
+      metersLostAccum += Math.max(0, knotsToMS(snapshotEntrySTW || stw_kn) - stw_ms) * dt;
 
-      // integrate actual and theoretical distances
-      // actualDistanceMeters integrates the boat's forward distance (m)
-      actualDistanceMeters += currentSTW * dt; // m/s * s = m
-      // theoretical uses snapshot entry speed (knots -> m/s)
-      theoreticalDistanceMeters += knotsToMS(snapshotEntrySTW) * dt;
+      // push snapshot for trace / debug
+      maneuverSnapshots.push(makeSnapshot(now, stw_ms, currentTWA, currentAWA));
 
-      // VMG distance integration (component towards target)
-      actualVmgDistanceMeters += liveVmgMS * dt;
-      theoreticalVmgDistanceMeters += knotsToMS(snapshotEntryVMG) * Math.cos(snapshotEntryTWA * Math.PI / 180.0) * dt;
-
-      // meters lost accumulation: difference between entry speed and live speed when slower
-      const speedDeficitMS = Math.max(0, knotsToMS(snapshotEntrySTW) - currentSTW);
-      metersLostAccum += speedDeficitMS * dt;
-
-      // simplistic criteria to move to Recovery state
+      // transition InTurn -> Recovery: when AWA settles away from crossing (within settleAngleDeg)
       if (currentState === 'InTurn') {
-        if (Math.abs(twaDeg) < 10) {
+        const settled = Math.abs(twa_deg) > CFG.settleAngleDeg && (Date.now() - inTurnTimestamp) / 1000.0 > CFG.minInturnSec;
+        if (settled && Math.abs(twa_deg) > CFG.settleAngleDeg) {
           currentState = 'Recovery';
+          recoveryStartTimestamp = Date.now();
         }
       }
 
-      // end recovery when STW reaches threshold
-      if (currentState === 'Recovery' && stwKnots >= (snapshotEntrySTW * (recoveryMultiplier || globalRecoveryMultiplier))) {
-        // compute summary with increased precision
-        const metersLost = Number(Math.max(metersLostAccum, theoreticalDistanceMeters - actualDistanceMeters).toFixed(1));
-        const summary = {
-          type: maneuverType,
-          timestamp: new Date().toISOString(),
-          metersLost: metersLost,
-          recoveryDurationSec: Number(((now - startTime) / 1000.0).toFixed(1)),
-          minStwKnots: Number(minSTW.toFixed(2)),
-          maxOverturnTWA: Number(maxOverturnTWA.toFixed(1)),
-          timeInDeadZoneSec: Number(timeInDeadZone.toFixed(2)),
-          actualDistanceMeters: Number(actualDistanceMeters.toFixed(2)),
-          theoreticalDistanceMeters: Number(theoreticalDistanceMeters.toFixed(2)),
-          actualVmgDistanceMeters: Number(actualVmgDistanceMeters.toFixed(2)),
-          theoreticalVmgDistanceMeters: Number(theoreticalVmgDistanceMeters.toFixed(2))
-        };
-        logTackToDatabase(summary);
-        // reset state
-        currentState = 'Straight';
-        maneuverType = 'Straight';
+      // transition Recovery -> Straight when STW reaches threshold or timeout
+      if (currentState === 'Recovery') {
+        const recovered = stw_kn >= (snapshotEntrySTW * (recoveryMultiplier || globalRecoveryMultiplier));
+        const elapsed = (now - (inTurnTimestamp || entryTimestamp || now)) / 1000.0;
+        if (recovered || elapsed > CFG.maxManeuverSec) {
+          const totalDuration = Number(((now - (inTurnTimestamp || entryTimestamp || now)) / 1000.0).toFixed(1));
+          const metersLost = Number(Math.max(metersLostAccum, theoreticalDistanceMeters - actualDistanceMeters).toFixed(1));
+
+          const summary = {
+            type: maneuverType,
+            timestamp: new Date().toISOString(),
+            durationSec: totalDuration,
+            metersLost: metersLost,
+            recoveryDurationSec: Number(((now - (inTurnTimestamp || entryTimestamp)) / 1000.0).toFixed(1)),
+            minStwKnots: Number(minSTW.toFixed(2)),
+            maxStwKnots: Number(maxSTW.toFixed(2)),
+            minVmgKnots: Number(minVMG.toFixed(3)),
+            maxVmgKnots: Number(maxVMG.toFixed(3)),
+            maxOverturnTWA: Number(maxOverturnTWA.toFixed(1)),
+            timeInDeadZoneSec: Number(timeInDeadZone.toFixed(2)),
+            actualDistanceMeters: Number(actualDistanceMeters.toFixed(2)),
+            theoreticalDistanceMeters: Number(theoreticalDistanceMeters.toFixed(2)),
+            actualVmgDistanceMeters: Number(actualVmgDistanceMeters.toFixed(2)),
+            theoreticalVmgDistanceMeters: Number(theoreticalVmgDistanceMeters.toFixed(2)),
+            samples: maneuverSnapshots.length
+          };
+
+          persistSummary(summary);
+
+          // reset to Straight and keep rolling history
+          currentState = 'Straight';
+          maneuverType = 'Straight';
+          resetManeuverState();
+        }
       }
     }
 
-    // emit live metrics for UI
+    // emit live state and metrics for the UI (knots/degrees)
     emitDelta('performance.maneuver.state', {
       state: currentState,
-      stwKnots: Number(stwKnots.toFixed(3)),
-      twaDeg: Number(twaDeg.toFixed(2)),
-      vmgKnots: Number(vmgKnots.toFixed(3)),
+      stwKnots: Number(msToKnots(currentSTW).toFixed(3)),
+      twaDeg: Number(deg(currentTWA).toFixed(2)),
+      vmgKnots: Number(msToKnots(currentSTW * Math.cos(Math.abs(currentTWA))).toFixed(3)),
       metersLostAccum: Number(metersLostAccum.toFixed(2))
     });
   }
 
-  // --- Plugin Methods ---
+  // --- Plugin life-cycle ---
   plugin.start = function (startOptions, restartPlugin) {
     options = startOptions || {};
     const configDir = (app.getDataDirPath && app.getDataDirPath()) || '.';
     historyFilePath = path.join(configDir, 'tack-history.json');
     loadHistoryDatabase();
 
-    if (options.orcUrl) {
-      fetchOrcPolarTargets(options.orcUrl);
-    } else {
-      orcTargetSTW = options.targetSpeedKnots || orcTargetSTW;
-    }
+    if (options.orcUrl) fetchOrcPolarTargets(options.orcUrl);
+    else orcTargetSTW = options.targetSpeedKnots || orcTargetSTW;
 
-    // Derive the dynamic multiplier from user settings
-    let thresholdPercent = options.recoveryThreshold || 95;
-    let recoveryMultiplier = thresholdPercent / 100;
+    const thresholdPercent = options.recoveryThreshold || 95;
+    const recoveryMultiplier = thresholdPercent / 100;
 
-    let localSub = {
+    const localSub = {
       context: 'vessels.self',
       subscribe: [
         { path: 'navigation.speedThroughWater', period: 100 },
@@ -322,69 +356,39 @@ module.exports = function (app) {
     };
 
     try {
-      app.subscriptionmanager.subscribe(
-        localSub,
-        unsubscribes,
-        subscriptionError => { app.error('Instrumentation binding error: ' + subscriptionError); },
-        delta => {
-          if (!delta || !delta.updates) return;
-          delta.updates.forEach(update => {
-            if (!update.values) return;
-            update.values.forEach(kv => {
-              // Coerce to numbers and drop non-numeric values
-              const v = safeNumber(kv.value);
-              if (v === null) return;
-              switch (kv.path) {
-                case 'navigation.speedThroughWater':
-                  currentSTW = v; // m/s
-                  lastDataTimestamp = Date.now();
-                  break;
-                case 'environment.wind.angleTrueWater':
-                  currentTWA = v; // radians
-                  lastDataTimestamp = Date.now();
-                  break;
-                case 'environment.wind.angleApparent':
-                  currentAWA = v; // radians
-                  lastDataTimestamp = Date.now();
-                  break;
-                case 'steering.rudderAngle':
-                  currentRudder = v; // radians
-                  lastDataTimestamp = Date.now();
-                  break;
-                case 'environment.wind.speedTrue':
-                  currentTWS = v; // m/s
-                  lastDataTimestamp = Date.now();
-                  resolveLivePolarTargets();
-                  break;
-                default:
-                  break;
-              }
-            });
+      app.subscriptionmanager.subscribe(localSub, unsubscribes, err => { if (err) app.error('Subscription error: ' + err); }, delta => {
+        if (!delta || !delta.updates) return;
+        delta.updates.forEach(update => {
+          if (!update.values) return;
+          update.values.forEach(kv => {
+            // For instrument feeds we expect numeric values per path
+            const vnum = safeNumber(kv.value);
+            if (vnum === null) return;
+            switch (kv.path) {
+              case 'navigation.speedThroughWater': currentSTW = vnum; lastDataTimestamp = Date.now(); break; // m/s
+              case 'environment.wind.angleTrueWater': currentTWA = vnum; lastDataTimestamp = Date.now(); break; // rad
+              case 'environment.wind.angleApparent': currentAWA = vnum; lastDataTimestamp = Date.now(); break; // rad
+              case 'steering.rudderAngle': currentRudder = vnum; lastDataTimestamp = Date.now(); break; // rad
+              case 'environment.wind.speedTrue': currentTWS = vnum; lastDataTimestamp = Date.now(); resolveLivePolarTargets(); break; // m/s
+              default: break;
+            }
           });
-        }
-      );
-    } catch (e) {
-      app.error('Failed to subscribe to instrument feeds: ' + e.message);
-    }
+        });
+      });
+    } catch (e) { app.error('Failed to subscribe: ' + (e && e.message)); }
 
     startEngineLoop(recoveryMultiplier);
   };
 
   plugin.stop = function () {
     try {
-      if (unsubscribes && unsubscribes.length) {
-        unsubscribes.forEach(u => { try { u(); } catch (e) {} });
-        unsubscribes = [];
-      }
-      if (simInterval) clearInterval(simInterval);
-      simInterval = null;
+      if (unsubscribes && unsubscribes.length) unsubscribes.forEach(u => { try { u(); } catch (e) {} });
+      unsubscribes = [];
+      if (analysisInterval) clearInterval(analysisInterval);
+      analysisInterval = null;
       saveHistoryDatabase();
-    } catch (e) {
-      app.error('Error while stopping plugin: ' + e.message);
-    }
+    } catch (e) { app.error('Error while stopping plugin: ' + (e && e.message)); }
   };
-
-  plugin.id = plugin.id || 'signal-k-tack-and-gybe';
 
   plugin.schema = {
     type: 'object',
