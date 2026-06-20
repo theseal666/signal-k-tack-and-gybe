@@ -34,13 +34,19 @@
     .rank-table th { color: #64748b; padding-bottom: 5px; border-bottom: 1px solid #2d2d34; }
     .rank-table td { padding: 5px 0; border-bottom: 1px solid #1f1f24; }
     .gold { color: #fbbf24; font-weight: bold; }
+    .ws-status { font-size: 0.9rem; color: #94a3b8; margin-left: 12px; }
+    .ws-status.connected { color: #34d399; }
+    .ws-status.disconnected { color: #f87171; }
   </style>
 </head>
 <body>
 
   <div style="max-width:1650px; margin: 0 auto 15px auto; display:flex; justify-content:space-between; align-items:center;">
     <h1 style="margin:0; font-size:1.6rem;">MAT 12.20 Tactical Performance Logger</h1>
-    <div id="maneuverState" class="status-badge state-Ready">Ready</div>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <div id="maneuverState" class="status-badge state-Ready">Ready</div>
+      <div id="wsStatus" class="ws-status disconnected">WS: disconnected</div>
+    </div>
   </div>
 
   <div class="grid-container">
@@ -103,37 +109,57 @@
 
     let tackStartIndex = null; let recoveryEndIndex = null;
 
-    const ctxChart = document.getElementById('timelineChart').getContext('2d');
-    const chart = new Chart(ctxChart, {
-      type: 'line',
-      data: {
-        labels: labels,
-        datasets: [
-          { label: 'STW (kn)', data: stwData, borderColor: '#38bdf8', borderWidth: 2, pointRadius: 0, fill: false },
-          { label: 'VMG (kn)', data: vmgData, borderColor: '#34d399', borderWidth: 2, pointRadius: 0, fill: false },
-          { label: 'AWA (deg)', data: awaData, borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa' }
-        ]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        scales: {
-          y: { type: 'linear', display: true, position: 'left', grid: { color: '#2d2d34' } },
-          yAwa: { type: 'linear', display: true, position: 'right', min: -180, max: 180, grid: { drawOnChartArea: false } },
-          x: { display: false }
-        },
-        plugins: {
-          legend: { labels: { color: '#e2e8f0' } },
-          annotation: {
-            annotations: {
-              tackZone: {
-                type: 'box', xMin: () => tackStartIndex, xMax: () => recoveryEndIndex,
-                backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: '#f59e0b', borderWidth: { left: 2, right: 2, top: 0, bottom: 0 }
+    // Safe Chart initialization: guard against plugin/version issues
+    let chart = null;
+    try {
+      const ctxChartElement = document.getElementById('timelineChart');
+      if (ctxChartElement && ctxChartElement.getContext) {
+        const ctxChart = ctxChartElement.getContext('2d');
+        chart = new Chart(ctxChart, {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [
+              { label: 'STW (kn)', data: stwData, borderColor: '#38bdf8', borderWidth: 2, pointRadius: 0, fill: false },
+              { label: 'VMG (kn)', data: vmgData, borderColor: '#34d399', borderWidth: 2, pointRadius: 0, fill: false },
+              { label: 'AWA (deg)', data: awaData, borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa' }
+            ]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            scales: {
+              y: { type: 'linear', display: true, position: 'left', grid: { color: '#2d2d34' } },
+              yAwa: { type: 'linear', display: true, position: 'right', min: -180, max: 180, grid: { drawOnChartArea: false } },
+              x: { display: false }
+            },
+            plugins: {
+              legend: { labels: { color: '#e2e8f0' } },
+              annotation: {
+                annotations: {
+                  tackZone: {
+                    type: 'box', xMin: () => tackStartIndex, xMax: () => recoveryEndIndex,
+                    backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: '#f59e0b', borderWidth: { left: 2, right: 2, top: 0, bottom: 0 }
+                  }
+                }
               }
             }
           }
-        }
+        });
+      } else {
+        console.warn('Chart canvas not available');
       }
-    });
+    } catch (e) {
+      console.error('Chart initialization failed. Plugin or Chart.js version may be incompatible.', e);
+      // degrade gracefully: create a minimal chart if possible
+      try {
+        const ctxChart = document.getElementById('timelineChart').getContext('2d');
+        chart = new Chart(ctxChart, { type: 'line', data: { labels, datasets: [{ label: 'STW (kn)', data: stwData, borderColor: '#38bdf8' }] }, options: { responsive: true } });
+        console.info('Fallback chart initialized');
+      } catch (e2) {
+        console.error('Fallback chart initialization also failed', e2);
+        chart = null;
+      }
+    }
 
     const canvas = document.getElementById('boatCanvas'); const ctxBoat = canvas.getContext('2d');
     function drawVessel(awaDeg) {
@@ -149,10 +175,17 @@
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/signalk/v1/stream?subscribe=none`;
+    console.debug('Connecting WS to', wsUrl);
     const ws = new WebSocket(wsUrl);
     let lastState = 'Ready';
+    let msgCount = 0;
 
     ws.onopen = () => {
+      console.info('WebSocket open');
+      document.getElementById('wsStatus').innerText = 'WS: connected';
+      document.getElementById('wsStatus').classList.remove('disconnected');
+      document.getElementById('wsStatus').classList.add('connected');
+
       ws.send(JSON.stringify({
         context: "vessels.self",
         subscribe: [
@@ -161,96 +194,132 @@
       }));
     };
 
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (!msg.updates) return;
-
-      msg.updates.forEach(update => {
-        update.values.forEach(kv => {
-          // Many values are objects. Handle both object and primitive payloads robustly.
-          try {
-            const p = kv.path;
-            const v = kv.value;
-
-            if (p === 'performance.maneuver.state') {
-              const stateVal = (v && typeof v === 'object' && 'state' in v) ? v.state : v;
-              document.getElementById('maneuverState').innerText = stateVal || 'Ready';
-              document.getElementById('maneuverState').className = `status-badge state-${stateVal || 'Ready'}`;
-
-              // also handle embedded live metrics if present (stwKnots, vmgKnots, twaDeg)
-              if (v && typeof v === 'object') {
-                if (typeof v.stwKnots === 'number') { document.getElementById('valSTW').innerText = v.stwKnots.toFixed(2) + ' kn'; stwData.push(v.stwKnots); stwData.shift(); }
-                if (typeof v.vmgKnots === 'number') { document.getElementById('valVMG').innerText = v.vmgKnots.toFixed(2) + ' kn'; vmgData.push(v.vmgKnots); vmgData.shift(); }
-                if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(v.twaDeg); awaData.shift(); drawVessel(v.twaDeg); }
-                if (typeof v.metersLostAccum === 'number') document.getElementById('valLost').innerText = v.metersLostAccum.toFixed(1) + ' m';
-              }
-
-              if (lastState === 'Ready' && stateVal === 'InTurn') { tackStartIndex = maxDataPoints - 1; recoveryEndIndex = null; }
-              if (lastState === 'Recovery' && stateVal === 'Ready') { recoveryEndIndex = maxDataPoints - 1; }
-              lastState = stateVal;
-            }
-
-            if (p === 'performance.maneuver.type') {
-              document.getElementById('valType').innerText = (v && typeof v === 'object' && v.type) ? v.type : v;
-            }
-
-            if (p === 'performance.maneuver.metersLost') {
-              const val = (v && typeof v === 'object' && typeof v.metersLost === 'number') ? v.metersLost : (typeof v === 'number' ? v : null);
-              if (val !== null) document.getElementById('valLost').innerText = val.toFixed(1) + ' m';
-            }
-
-            // Capture Analysis Summaries
-            if (p === 'performance.maneuver.lastSummary') {
-              const s = v;
-              if (s && typeof s === 'object') {
-                document.getElementById('cardLost').innerText = (s.metersLost || 0) + ' m';
-                // VMG meters lost isn't currently written by the plugin; show actualVmgDistanceMeters gap instead
-                const vmgLost = (s.theoreticalVmgDistanceMeters && s.actualVmgDistanceMeters) ? (s.theoreticalVmgDistanceMeters - s.actualVmgDistanceMeters).toFixed(2) : '-';
-                document.getElementById('cardVmgLost').innerText = (vmgLost === '-') ? '-' : vmgLost + ' m';
-                document.getElementById('cardRecTime').innerText = (s.recoveryDurationSec || '-') + ' s';
-                document.getElementById('cardStwMinMax').innerText = `${(s.minStwKnots||'-')} / ${(s.maxStwKnots||'-')} kn`;
-                document.getElementById('cardVmgStartMax').innerText = `${(s.actualVmgDistanceMeters||'-')} / ${(s.theoreticalVmgDistanceMeters||'-')} m`;
-                document.getElementById('cardOverturn').innerText = (s.maxOverturnTWA || '-') + '°';
-                document.getElementById('cardFlapTime').innerText = (s.timeInDeadZoneSec || '-') + ' s';
-              }
-            }
-
-            // Capture Database Updates
-            if (p === 'performance.maneuver.database') {
-              const db = v;
-              if (db && typeof db === 'object') {
-                document.getElementById('avgCount').innerText = db.totalTacksLogged || 0;
-                document.getElementById('avgLost').innerText = (db.averages && db.averages.metersLost) ? (db.averages.metersLost + ' m') : '-';
-                document.getElementById('avgRecTime').innerText = (db.averages && db.averages.recoveryDurationSec) ? (db.averages.recoveryDurationSec + ' s') : '-';
-                document.getElementById('avgMinStw').innerText = (db.averages && db.averages.minStwKnots) ? (db.averages.minStwKnots + ' kn') : '-';
-
-                // Render Leaderboard Rows Dynamically
-                let html = '';
-                (db.topTenBests || []).forEach((t, i) => {
-                  let cls = i === 0 ? 'class="gold"' : '';
-                  const lost = t.metersLost != null ? t.metersLost + 'm' : '-';
-                  const rec = t.recoveryDurationSec != null ? t.recoveryDurationSec + 's' : '-';
-                  const ov = t.maxOverturnTWA != null ? t.maxOverturnTWA + '°' : '-';
-                  html += `<tr ${cls}><td>${i+1}</td><td>${lost}</td><td>${rec}</td><td>${ov}</td></tr>`;
-                });
-                document.getElementById('leaderboardBody').innerHTML = html || '<tr><td colspan="4">No data logged</td></tr>';
-              }
-            }
-
-          } catch (e) {
-            console.error('Dashboard message processing error', e);
-          }
-        });
-      });
-
-      // advance animation indices
-      if (tackStartIndex !== null) tackStartIndex--;
-      if (recoveryEndIndex !== null) recoveryEndIndex--;
-      if (tackStartIndex < 0 && recoveryEndIndex < 0) { tackStartIndex = null; recoveryEndIndex = null; }
-      chart.update('none');
+    ws.onerror = (e) => {
+      console.error('WebSocket error', e);
+      document.getElementById('wsStatus').innerText = 'WS: error';
+      document.getElementById('wsStatus').classList.remove('connected');
+      document.getElementById('wsStatus').classList.add('disconnected');
     };
 
+    ws.onclose = (e) => {
+      console.warn('WebSocket closed', e);
+      document.getElementById('wsStatus').innerText = 'WS: closed';
+      document.getElementById('wsStatus').classList.remove('connected');
+      document.getElementById('wsStatus').classList.add('disconnected');
+    };
+
+    ws.onmessage = (event) => {
+      msgCount++;
+      if (msgCount % 50 === 0) console.debug('WS messages received', msgCount);
+      try {
+        const msg = JSON.parse(event.data);
+        if (!msg.updates) {
+          // log unexpected messages for debugging
+          console.debug('WS message without updates', msg);
+          return;
+        }
+
+        msg.updates.forEach(update => {
+          update.values.forEach(kv => {
+            // Many values are objects. Handle both object and primitive payloads robustly.
+            try {
+              const p = kv.path;
+              const v = kv.value;
+
+              // Handle the case where plugin publishes a single 'performance.maneuver' object containing multiple fields
+              if (p === 'performance.maneuver' && v && typeof v === 'object') {
+                Object.keys(v).forEach(subk => {
+                  const pseudo = { path: `performance.maneuver.${subk}`, value: v[subk] };
+                  // reuse the same handling by processing the pseudo entry
+                  processKv(pseudo.path, pseudo.value);
+                });
+                return;
+              }
+
+              processKv(p, v);
+
+            } catch (e) {
+              console.error('Dashboard message processing error', e);
+            }
+          });
+        });
+
+        // advance animation indices
+        if (tackStartIndex !== null) tackStartIndex--;
+        if (recoveryEndIndex !== null) recoveryEndIndex--;
+        if (tackStartIndex < 0 && recoveryEndIndex < 0) { tackStartIndex = null; recoveryEndIndex = null; }
+        if (chart) chart.update('none');
+      } catch(e) {
+        console.error('WS onmessage parse error', e, event.data);
+      }
+    };
+
+    function processKv(p, v) {
+      if (p === 'performance.maneuver.state') {
+        const stateVal = (v && typeof v === 'object' && 'state' in v) ? v.state : v;
+        document.getElementById('maneuverState').innerText = stateVal || 'Ready';
+        document.getElementById('maneuverState').className = `status-badge state-${stateVal || 'Ready'}`;
+
+        if (v && typeof v === 'object') {
+          if (typeof v.stwKnots === 'number') { document.getElementById('valSTW').innerText = v.stwKnots.toFixed(2) + ' kn'; stwData.push(v.stwKnots); stwData.shift(); }
+          if (typeof v.vmgKnots === 'number') { document.getElementById('valVMG').innerText = v.vmgKnots.toFixed(2) + ' kn'; vmgData.push(v.vmgKnots); vmgData.shift(); }
+          if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(v.twaDeg); awaData.shift(); drawVessel(v.twaDeg); }
+          if (typeof v.metersLostAccum === 'number') document.getElementById('valLost').innerText = v.metersLostAccum.toFixed(1) + ' m';
+        }
+
+        if (lastState === 'Ready' && stateVal === 'InTurn') { tackStartIndex = maxDataPoints - 1; recoveryEndIndex = null; }
+        if (lastState === 'Recovery' && stateVal === 'Ready') { recoveryEndIndex = maxDataPoints - 1; }
+        lastState = stateVal;
+      }
+
+      if (p === 'performance.maneuver.type') {
+        document.getElementById('valType').innerText = (v && typeof v === 'object' && v.type) ? v.type : v;
+      }
+
+      if (p === 'performance.maneuver.metersLost') {
+        const val = (v && typeof v === 'object' && typeof v.metersLost === 'number') ? v.metersLost : (typeof v === 'number' ? v : null);
+        if (val !== null) document.getElementById('valLost').innerText = val.toFixed(1) + ' m';
+      }
+
+      if (p === 'performance.maneuver.lastSummary') {
+        const s = v;
+        if (s && typeof s === 'object') {
+          document.getElementById('cardLost').innerText = (s.metersLost || 0) + ' m';
+          const vmgLost = (s.theoreticalVmgDistanceMeters && s.actualVmgDistanceMeters) ? (s.theoreticalVmgDistanceMeters - s.actualVmgDistanceMeters).toFixed(2) : '-';
+          document.getElementById('cardVmgLost').innerText = (vmgLost === '-') ? '-' : vmgLost + ' m';
+          document.getElementById('cardRecTime').innerText = (s.recoveryDurationSec || '-') + ' s';
+          document.getElementById('cardStwMinMax').innerText = `${(s.minStwKnots||'-')} / ${(s.maxStwKnots||'-')} kn`;
+          document.getElementById('cardVmgStartMax').innerText = `${(s.actualVmgDistanceMeters||'-')} / ${(s.theoreticalVmgDistanceMeters||'-')} m`;
+          document.getElementById('cardOverturn').innerText = (s.maxOverturnTWA || '-') + '°';
+          document.getElementById('cardFlapTime').innerText = (s.timeInDeadZoneSec || '-') + ' s';
+        }
+      }
+
+      if (p === 'performance.maneuver.database') {
+        const db = v;
+        if (db && typeof db === 'object') {
+          document.getElementById('avgCount').innerText = db.totalTacksLogged || 0;
+          document.getElementById('avgLost').innerText = (db.averages && db.averages.metersLost) ? (db.averages.metersLost + ' m') : '-';
+          document.getElementById('avgRecTime').innerText = (db.averages && db.averages.recoveryDurationSec) ? (db.averages.recoveryDurationSec + ' s') : '-';
+          document.getElementById('avgMinStw').innerText = (db.averages && db.averages.minStwKnots) ? (db.averages.minStwKnots + ' kn') : '-';
+
+          let html = '';
+          (db.topTenBests || []).forEach((t, i) => {
+            let cls = i === 0 ? 'class="gold"' : '';
+            const lost = t.metersLost != null ? t.metersLost + 'm' : '-';
+            const rec = t.recoveryDurationSec != null ? t.recoveryDurationSec + 's' : '-';
+            const ov = t.maxOverturnTWA != null ? t.maxOverturnTWA + '°' : '-';
+            html += `<tr ${cls}><td>${i+1}</td><td>${lost}</td><td>${rec}</td><td>${ov}</td></tr>`;
+          });
+          document.getElementById('leaderboardBody').innerHTML = html || '<tr><td colspan="4">No data logged</td></tr>';
+        }
+      }
+    }
+
     drawVessel(-40);
+
+    // Expose for debugging in console
+    window._tackDashboard = { ws, chart, stwData, vmgData, awaData };
   </script>
 </body>
 </html>
