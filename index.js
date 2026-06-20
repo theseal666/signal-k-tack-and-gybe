@@ -23,9 +23,9 @@ module.exports = function (app) {
   let pendingStartTime = 0;
   let accelerationStartTime = 0; 
   
-  let snapshotEntrySTW = 0;
-  let snapshotEntryVMG = 0;
-  let snapshotEntryTWA = 0;
+  let snapshotEntrySTW = 0; // knots
+  let snapshotEntryVMG = 0; // knots
+  let snapshotEntryTWA = 0; // degrees
   
   let minSTW = 99; let maxSTW = 0;
   let minVMG = 99; let maxVMG = 0;
@@ -34,22 +34,36 @@ module.exports = function (app) {
 
   let actualDistanceMeters = 0; let theoreticalDistanceMeters = 0;
   let actualVmgDistanceMeters = 0; let theoreticalVmgDistanceMeters = 0;
+  let metersLostAccum = 0;
 
+  // Live inputs (currentSTW is in m/s, others in radians or m/s as applicable)
   let currentSTW = 4.01;   
   let currentTWA = -0.698; 
   let currentAWA = -0.488; 
   let currentRudder = 0.0; 
-  let currentTWS = 6.17;   // Default 12 knots true wind speed for polar resolution
+  let currentTWS = 6.17;   // m/s
 
   let orcTargetSTW = 7.80; 
 
   let globalRecoveryMultiplier = 0.95;
+
+  let lastAnalysisTime = Date.now();
+  let lastDataTimestamp = 0; // updated when we receive valid data
 
   let performanceDatabase = {
     totalTacksLogged: 0,
     averages: { metersLost: 0, recoveryDurationSec: 0, minStwKnots: 0 },
     topTenBests: [] 
   };
+
+  // --- Helpers ---
+  const knotsToMS = k => k * 0.514444;
+  const msToKnots = m => m * 1.94384;
+
+  function safeNumber(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
 
   // Load/Save history
   function loadHistoryDatabase() {
@@ -90,10 +104,10 @@ module.exports = function (app) {
 
   function resolveLivePolarTargets() {
     if (!options.polarData) return;
-    let twsKnots = currentTWS * 1.94384;
+    let twsKnots = msToKnots(currentTWS);
     try {
       let vpp = options.polarData;
-      if (vpp.vmgUpwind && Array.isArray(vpp.vmgUpwind)) {
+      if (vpp.vmgUpwind && Array.isArray(vpp.vmgUpwind) && vpp.vmgUpwind.length) {
         // Find first item where twsKnots <= item.tws, fallback to last
         let target = vpp.vmgUpwind.find(item => twsKnots <= item.tws) || vpp.vmgUpwind[vpp.vmgUpwind.length - 1];
         if (target) orcTargetSTW = target.vboat || options.targetSpeedKnots || orcTargetSTW;
@@ -127,8 +141,8 @@ module.exports = function (app) {
     emitDelta('performance.maneuver.lastSummary', summary);
   }
 
-  // Note: This plugin must be agnostic to the data source. It SHOULD NOT run an internal simulation.
-  // It processes whatever data arrives via app.subscriptionmanager (either instrument feeds or your separate sim plugin publishing the same paths).
+  // Note: This plugin must be agnostic to the data source. It should NOT run an internal simulation.
+  // It processes whatever data arrives via app.subscriptionmanager (either instrument feeds or a separate sim plugin publishing the same paths).
 
   function startEngineLoop(recoveryMultiplier) {
     globalRecoveryMultiplier = recoveryMultiplier || 0.95;
@@ -136,6 +150,7 @@ module.exports = function (app) {
 
     // Run analysis periodically but do NOT mutate current* variables here. The data must come from
     // the Signal K subscription (real instruments) or a separate sim plugin that publishes the same paths.
+    lastAnalysisTime = Date.now();
     simInterval = setInterval(() => {
       try {
         runAnalysisPipeline(orcTargetSTW, globalRecoveryMultiplier);
@@ -146,56 +161,96 @@ module.exports = function (app) {
   }
 
   function runAnalysisPipeline(activeTargetSTW, recoveryMultiplier) {
-    let stwKnots = currentSTW * 1.94384;
-    let twaDeg = currentTWA * 180 / Math.PI;
-    let awaDeg = currentAWA * 180 / Math.PI;
-    let rudderDeg = currentRudder * 180 / Math.PI;
-    
-    let liveVmgMS = currentSTW * Math.cos(currentTWA);
-    let vmgKnots = liveVmgMS * 1.94384;
+    const now = Date.now();
+    let dt = (now - lastAnalysisTime) / 1000.0;
+    if (!Number.isFinite(dt) || dt <= 0) dt = 0.2; // fallback
+    lastAnalysisTime = now;
 
+    // If we haven't received fresh data recently, skip heavy computations
+    if (!lastDataTimestamp || (now - lastDataTimestamp) > 2000) {
+      // still emit state but mark as stale
+      emitDelta('performance.maneuver.state', { state: currentState, stale: true });
+      return;
+    }
+
+    // currentSTW is m/s -> convert to knots for comparisons where needed
+    const stwKnots = msToKnots(currentSTW);
+    const twaDeg = currentTWA * 180.0 / Math.PI;
+    const awaDeg = currentAWA * 180.0 / Math.PI;
+    const rudderDeg = currentRudder * 180.0 / Math.PI;
+
+    const liveVmgMS = currentSTW * Math.cos(currentTWA); // m/s
+    const vmgKnots = msToKnots(liveVmgMS);
+
+    // Maintain rolling history for look-back snapshots
     if (currentState === 'Straight' || currentState === 'Pending') {
-      rollingHistory.push({ stw: stwKnots, vmg: vmgKnots, twa: twaDeg });
+      rollingHistory.push({ stw: Number(stwKnots.toFixed(3)), vmg: Number(vmgKnots.toFixed(3)), twa: Number(twaDeg.toFixed(2)), ts: now });
       if (rollingHistory.length > BUFFER_SIZE) rollingHistory.shift();
     }
 
+    // Entry detection
     if (currentState === 'Straight') {
       if (Math.abs(rudderDeg) > 5 && Math.abs(twaDeg) < 32) {
         currentState = 'Pending';
-        pendingStartTime = Date.now();
+        pendingStartTime = now;
         let historicalBase = rollingHistory[0] || { stw: stwKnots, vmg: vmgKnots, twa: twaDeg };
-        snapshotEntrySTW = historicalBase.stw;
-        snapshotEntryVMG = historicalBase.vmg;
-        snapshotEntryTWA = Math.abs(historicalBase.twa);
+        snapshotEntrySTW = historicalBase.stw; // knots
+        snapshotEntryVMG = historicalBase.vmg; // knots
+        snapshotEntryTWA = Math.abs(historicalBase.twa); // degrees
         maxOverturnTWA = 0;
         timeInDeadZone = 0;
+        metersLostAccum = 0;
+        actualDistanceMeters = 0; theoreticalDistanceMeters = 0;
+        actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0;
       }
     }
 
+    // Pending logic: detect sign-cross of TWA
     if (currentState === 'Pending') {
-      let timeInPending = (Date.now() - pendingStartTime) / 1000;
+      let timeInPending = (now - pendingStartTime) / 1000.0;
       let historyEntry = rollingHistory[0] || { twa: twaDeg };
       let signChange = (historyEntry.twa < 0 && twaDeg > 0) || (historyEntry.twa > 0 && twaDeg < 0);
 
       if (signChange && Math.abs(twaDeg) < 15) {
         currentState = 'InTurn';
         maneuverType = 'Tack';
-        startTime = Date.now();
+        startTime = now;
         minSTW = stwKnots; maxSTW = stwKnots;
         minVMG = vmgKnots; maxVMG = vmgKnots;
-        actualDistanceMeters = 0; theoreticalDistanceMeters = 0;
-        actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0;
+        // initialize integration accumulators already done at entry
       } else if (timeInPending > 10.0 || Math.abs(twaDeg) > 35) {
         currentState = 'Straight';
       }
     }
 
+    // During InTurn/Recovery we integrate distance, VMG and track min/max
     if (currentState === 'InTurn' || currentState === 'Recovery') {
       // update min/max
       minSTW = Math.min(minSTW, stwKnots);
       maxSTW = Math.max(maxSTW, stwKnots);
       minVMG = Math.min(minVMG, vmgKnots);
       maxVMG = Math.max(maxVMG, vmgKnots);
+
+      // update overturn: how much absolute TWA exceeded the original entry TWA (heuristic)
+      const overturn = Math.max(0, Math.abs(twaDeg) - snapshotEntryTWA);
+      if (overturn > maxOverturnTWA) maxOverturnTWA = overturn;
+
+      // dead zone: when TWA under 20 degrees (sails luffing)
+      if (Math.abs(twaDeg) < 20) timeInDeadZone += dt;
+
+      // integrate actual and theoretical distances
+      // actualDistanceMeters integrates the boat's forward distance (m)
+      actualDistanceMeters += currentSTW * dt; // m/s * s = m
+      // theoretical uses snapshot entry speed (knots -> m/s)
+      theoreticalDistanceMeters += knotsToMS(snapshotEntrySTW) * dt;
+
+      // VMG distance integration (component towards target)
+      actualVmgDistanceMeters += liveVmgMS * dt;
+      theoreticalVmgDistanceMeters += knotsToMS(snapshotEntryVMG) * Math.cos(snapshotEntryTWA * Math.PI / 180.0) * dt;
+
+      // meters lost accumulation: difference between entry speed and live speed when slower
+      const speedDeficitMS = Math.max(0, knotsToMS(snapshotEntrySTW) - currentSTW);
+      metersLostAccum += speedDeficitMS * dt;
 
       // simplistic criteria to move to Recovery state
       if (currentState === 'InTurn') {
@@ -206,13 +261,20 @@ module.exports = function (app) {
 
       // end recovery when STW reaches threshold
       if (currentState === 'Recovery' && stwKnots >= (snapshotEntrySTW * (recoveryMultiplier || globalRecoveryMultiplier))) {
-        // compute summary
-        let summary = {
+        // compute summary with increased precision
+        const metersLost = Number(Math.max(metersLostAccum, theoreticalDistanceMeters - actualDistanceMeters).toFixed(1));
+        const summary = {
           type: maneuverType,
           timestamp: new Date().toISOString(),
-          metersLost: Number(((snapshotEntrySTW - minSTW) * 10).toFixed(1)), // placeholder calc
-          recoveryDurationSec: Math.round((Date.now() - startTime) / 1000),
-          minStwKnots: Number(minSTW.toFixed(2))
+          metersLost: metersLost,
+          recoveryDurationSec: Number(((now - startTime) / 1000.0).toFixed(1)),
+          minStwKnots: Number(minSTW.toFixed(2)),
+          maxOverturnTWA: Number(maxOverturnTWA.toFixed(1)),
+          timeInDeadZoneSec: Number(timeInDeadZone.toFixed(2)),
+          actualDistanceMeters: Number(actualDistanceMeters.toFixed(2)),
+          theoreticalDistanceMeters: Number(theoreticalDistanceMeters.toFixed(2)),
+          actualVmgDistanceMeters: Number(actualVmgDistanceMeters.toFixed(2)),
+          theoreticalVmgDistanceMeters: Number(theoreticalVmgDistanceMeters.toFixed(2))
         };
         logTackToDatabase(summary);
         // reset state
@@ -221,8 +283,14 @@ module.exports = function (app) {
       }
     }
 
-    // emit some live deltas for debugging/visibility
-    emitDelta('performance.maneuver.state', { state: currentState, stwKnots: Number(stwKnots.toFixed(2)), twaDeg: Number(twaDeg.toFixed(1)) });
+    // emit live metrics for UI
+    emitDelta('performance.maneuver.state', {
+      state: currentState,
+      stwKnots: Number(stwKnots.toFixed(3)),
+      twaDeg: Number(twaDeg.toFixed(2)),
+      vmgKnots: Number(vmgKnots.toFixed(3)),
+      metersLostAccum: Number(metersLostAccum.toFixed(2))
+    });
   }
 
   // --- Plugin Methods ---
@@ -263,13 +331,33 @@ module.exports = function (app) {
           delta.updates.forEach(update => {
             if (!update.values) return;
             update.values.forEach(kv => {
-              if (kv.path === 'navigation.speedThroughWater') currentSTW = kv.value;
-              if (kv.path === 'environment.wind.angleTrueWater') currentTWA = kv.value;
-              if (kv.path === 'environment.wind.angleApparent') currentAWA = kv.value;
-              if (kv.path === 'steering.rudderAngle') currentRudder = kv.value;
-              if (kv.path === 'environment.wind.speedTrue') {
-                currentTWS = kv.value;
-                resolveLivePolarTargets(); 
+              // Coerce to numbers and drop non-numeric values
+              const v = safeNumber(kv.value);
+              if (v === null) return;
+              switch (kv.path) {
+                case 'navigation.speedThroughWater':
+                  currentSTW = v; // m/s
+                  lastDataTimestamp = Date.now();
+                  break;
+                case 'environment.wind.angleTrueWater':
+                  currentTWA = v; // radians
+                  lastDataTimestamp = Date.now();
+                  break;
+                case 'environment.wind.angleApparent':
+                  currentAWA = v; // radians
+                  lastDataTimestamp = Date.now();
+                  break;
+                case 'steering.rudderAngle':
+                  currentRudder = v; // radians
+                  lastDataTimestamp = Date.now();
+                  break;
+                case 'environment.wind.speedTrue':
+                  currentTWS = v; // m/s
+                  lastDataTimestamp = Date.now();
+                  resolveLivePolarTargets();
+                  break;
+                default:
+                  break;
               }
             });
           });
