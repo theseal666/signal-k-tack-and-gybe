@@ -109,12 +109,48 @@
 
     let tackStartIndex = null; let recoveryEndIndex = null;
 
-    // Safe Chart initialization: guard against plugin/version issues
+    // Register annotation plugin if available and avoid double registration
+    if (window.Chart && window['chartjs-plugin-annotation']) {
+      try {
+        if (!Chart.registry || !Chart.registry.plugins || !Chart.registry.plugins.items || !Chart.registry.plugins.items.includes(window['chartjs-plugin-annotation'])) {
+          Chart.register(window['chartjs-plugin-annotation']);
+          console.info('annotation plugin registered');
+        }
+      } catch (e) {
+        console.warn('Annotation register failed', e);
+      }
+    }
+
+    // Safe Chart initialization: guard against plugin/version issues and destroy any previous chart
     let chart = null;
     try {
       const ctxChartElement = document.getElementById('timelineChart');
-      if (ctxChartElement && ctxChartElement.getContext) {
+      if (ctxChartElement) {
+        // If a chart already exists on this canvas, destroy it first to avoid "Canvas already in use" errors
+        try {
+          if (typeof Chart.getChart === 'function') {
+            const existing = Chart.getChart(ctxChartElement);
+            if (existing) { existing.destroy(); }
+          } else if (window._existingChart) {
+            window._existingChart.destroy(); window._existingChart = null;
+          }
+        } catch(e) { console.warn('Error while destroying existing chart', e); }
+
         const ctxChart = ctxChartElement.getContext('2d');
+        // Ensure annotation options object exists
+        const chartOptions = {
+          responsive: true, maintainAspectRatio: false,
+          scales: {
+            y: { type: 'linear', display: true, position: 'left', grid: { color: '#2d2d34' } },
+            yAwa: { type: 'linear', display: true, position: 'right', min: -180, max: 180, grid: { drawOnChartArea: false } },
+            x: { display: false }
+          },
+          plugins: {
+            legend: { labels: { color: '#e2e8f0' } },
+            annotation: { annotations: { tackZone: { type: 'box', xMin: () => tackStartIndex, xMax: () => recoveryEndIndex, backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: '#f59e0b', borderWidth: { left: 2, right: 2, top: 0, bottom: 0 } } } }
+          }
+        };
+
         chart = new Chart(ctxChart, {
           type: 'line',
           data: {
@@ -125,36 +161,24 @@
               { label: 'AWA (deg)', data: awaData, borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa' }
             ]
           },
-          options: {
-            responsive: true, maintainAspectRatio: false,
-            scales: {
-              y: { type: 'linear', display: true, position: 'left', grid: { color: '#2d2d34' } },
-              yAwa: { type: 'linear', display: true, position: 'right', min: -180, max: 180, grid: { drawOnChartArea: false } },
-              x: { display: false }
-            },
-            plugins: {
-              legend: { labels: { color: '#e2e8f0' } },
-              annotation: {
-                annotations: {
-                  tackZone: {
-                    type: 'box', xMin: () => tackStartIndex, xMax: () => recoveryEndIndex,
-                    backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: '#f59e0b', borderWidth: { left: 2, right: 2, top: 0, bottom: 0 }
-                  }
-                }
-              }
-            }
-          }
+          options: chartOptions
         });
+        window._existingChart = chart;
       } else {
         console.warn('Chart canvas not available');
       }
     } catch (e) {
       console.error('Chart initialization failed. Plugin or Chart.js version may be incompatible.', e);
-      // degrade gracefully: create a minimal chart if possible
+      // degrade gracefully: try a minimal chart after destroying any existing one
       try {
-        const ctxChart = document.getElementById('timelineChart').getContext('2d');
-        chart = new Chart(ctxChart, { type: 'line', data: { labels, datasets: [{ label: 'STW (kn)', data: stwData, borderColor: '#38bdf8' }] }, options: { responsive: true } });
-        console.info('Fallback chart initialized');
+        const ctxChartElement = document.getElementById('timelineChart');
+        if (ctxChartElement) {
+          try { if (typeof Chart.getChart === 'function') { const existing = Chart.getChart(ctxChartElement); if (existing) existing.destroy(); } } catch(e){}
+          const ctxChart = ctxChartElement.getContext('2d');
+          chart = new Chart(ctxChart, { type: 'line', data: { labels, datasets: [{ label: 'STW (kn)', data: stwData, borderColor: '#38bdf8' }] }, options: { responsive: true } });
+          window._existingChart = chart;
+          console.info('Fallback chart initialized');
+        }
       } catch (e2) {
         console.error('Fallback chart initialization also failed', e2);
         chart = null;
@@ -186,9 +210,11 @@
       document.getElementById('wsStatus').classList.remove('disconnected');
       document.getElementById('wsStatus').classList.add('connected');
 
+      // Subscribe to both aggregate and dotted paths to ensure we receive data regardless of plugin emission shape
       ws.send(JSON.stringify({
         context: "vessels.self",
         subscribe: [
+          { path: "performance.maneuver", period: 100 },
           { path: "performance.maneuver.*", period: 100 }
         ]
       }));
@@ -214,24 +240,20 @@
       try {
         const msg = JSON.parse(event.data);
         if (!msg.updates) {
-          // log unexpected messages for debugging
           console.debug('WS message without updates', msg);
           return;
         }
 
         msg.updates.forEach(update => {
           update.values.forEach(kv => {
-            // Many values are objects. Handle both object and primitive payloads robustly.
             try {
               const p = kv.path;
               const v = kv.value;
 
-              // Handle the case where plugin publishes a single 'performance.maneuver' object containing multiple fields
               if (p === 'performance.maneuver' && v && typeof v === 'object') {
                 Object.keys(v).forEach(subk => {
-                  const pseudo = { path: `performance.maneuver.${subk}`, value: v[subk] };
-                  // reuse the same handling by processing the pseudo entry
-                  processKv(pseudo.path, pseudo.value);
+                  const pseudoPath = `performance.maneuver.${subk}`;
+                  processKv(pseudoPath, v[subk]);
                 });
                 return;
               }
@@ -244,7 +266,6 @@
           });
         });
 
-        // advance animation indices
         if (tackStartIndex !== null) tackStartIndex--;
         if (recoveryEndIndex !== null) recoveryEndIndex--;
         if (tackStartIndex < 0 && recoveryEndIndex < 0) { tackStartIndex = null; recoveryEndIndex = null; }
@@ -256,7 +277,8 @@
 
     function processKv(p, v) {
       if (p === 'performance.maneuver.state') {
-        const stateVal = (v && typeof v === 'object' && 'state' in v) ? v.state : v;
+        // state may be nested (v.state) or direct
+        const stateVal = (v && typeof v === 'object' && ('state' in v)) ? v.state : (typeof v === 'string' ? v : (v && v.state ? v.state : undefined));
         document.getElementById('maneuverState').innerText = stateVal || 'Ready';
         document.getElementById('maneuverState').className = `status-badge state-${stateVal || 'Ready'}`;
 
