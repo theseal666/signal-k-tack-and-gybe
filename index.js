@@ -46,111 +46,18 @@ module.exports = function (app) {
   let simStep = 0;
   let isManeuvering = false;
 
+  let globalRecoveryMultiplier = 0.95;
+
   let performanceDatabase = {
     totalTacksLogged: 0,
     averages: { metersLost: 0, recoveryDurationSec: 0, minStwKnots: 0 },
     topTenBests: [] 
   };
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-  // --- Helper Functions (Defined in scope) ---
-=======
-  plugin.start = function (startOptions, restartPlugin) {
-    options = startOptions || {};
-    
-    const configDir = app.getDataDirPath();
-    historyFilePath = path.join(configDir, 'tack-history.json');
-    loadHistoryDatabase();
-
-    // Pull targets down if an official certificate endpoint exists
-    if (options.orcUrl) {
-      fetchOrcPolarTargets(options.orcUrl);
-    } else {
-      orcTargetSTW = options.targetSpeedKnots || 7.80;
-    }
-
-    let thresholdPercent = options.recoveryThreshold || 95;
-    let recoveryMultiplier = thresholdPercent / 100;
-
-    // Bind live instrumentation data feeds from the H5000 network
-    let localSub = {
-      context: 'vessels.self',
-      subscribe: [
-        { path: 'navigation.speedThroughWater', period: 100 },
-        { path: 'environment.wind.angleTrueWater', period: 100 },
-        { path: 'environment.wind.angleApparent', period: 100 },
-        { path: 'steering.rudderAngle', period: 100 },
-        { path: 'environment.wind.speedTrue', period: 500 }
-      ]
-    };
-
-    app.subscriptionmanager.subscribe(
-      localSub,
-      unsubscribes,
-      subscriptionError => {
-        app.error('H5000 instrumentation binding error: ' + subscriptionError);
-      },
-      delta => {
-        delta.updates.forEach(update => {
-          update.values.forEach(kv => {
-            if (kv.path === 'navigation.speedThroughWater') currentSTW = kv.value;
-            if (kv.path === 'environment.wind.angleTrueWater') currentTWA = kv.value;
-            if (kv.path === 'environment.wind.angleApparent') currentAWA = kv.value;
-            if (kv.path === 'steering.rudderAngle') currentRudder = kv.value;
-            if (kv.path === 'environment.wind.speedTrue') {
-              currentTWS = kv.value;
-              resolveLivePolarTargets(); // Re-evaluate targets as the wind fluctuates
-            }
-          });
-        });
-      }
-    );
-
-    startEngineLoop(recoveryMultiplier);
-  };
-
-  async function fetchOrcPolarTargets(url) {
-    try {
-      app.debug(`Querying ORC database for certificate profiles: ${url}`);
-      const response = await axios.get(url, { timeout: 5000 });
-      if (response.data && response.data.rms) {
-        // Cache ORC polar data structures into local memory options
-        options.polarData = response.data.rms;
-        resolveLivePolarTargets();
-        app.debug('ORC polar data curves populated successfully.');
-      }
-    } catch (err) {
-      app.error('ORC API retrieval failed, defaulting to backup parameters: ' + err.message);
-      orcTargetSTW = options.targetSpeedKnots || 7.80;
-    }
-  }
-
-  function resolveLivePolarTargets() {
-    if (!options.polarData) return;
-    
-    let twsKnots = currentTWS * 1.94384;
-    
-    // ORC optimization arrays: Resolving optimal upwind target angle speeds 
-    // Parses certificate data records mapping target speed variables across current TWS increments
-    try {
-      let vpp = options.polarData;
-      if (vpp.vmgUpwind && Array.isArray(vpp.vmgUpwind)) {
-        // Basic linear interpolation across the standard ORC wind speeds matrix [6, 8, 10, 12, 14, 16, 20]
-        let target = vpp.vmgUpwind.find(item => twsKnots <= item.tws);
-        if (target) {
-          orcTargetSTW = target.vboat || options.targetSpeedKnots;
-        }
-      }
-    } catch (e) {
-      app.error('Error resolving real-time ORC polar matrix: ' + e.message);
-    }
-  }
-
->>>>>>> parent of 5472b8f (fix borken plug)
+  // Load/Save history
   function loadHistoryDatabase() {
     try {
-      if (fs.existsSync(historyFilePath)) {
+      if (historyFilePath && fs.existsSync(historyFilePath)) {
         const fileData = fs.readFileSync(historyFilePath, 'utf8');
         performanceDatabase = JSON.parse(fileData);
       }
@@ -161,36 +68,25 @@ module.exports = function (app) {
 
   function saveHistoryDatabase() {
     try {
+      if (!historyFilePath) return;
       fs.writeFileSync(historyFilePath, JSON.stringify(performanceDatabase, null, 2), 'utf8');
     } catch (e) {
       app.error('Failed to write history database: ' + e.message);
     }
   }
 
-<<<<<<< HEAD
+  // Fetch ORC polar targets using axios with timeout
   async function fetchOrcPolarTargets(url) {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const data = await response.json();
-      if (data && data.rms) {
-        options.polarData = data.rms;
+      app.debug(`Querying ORC database for certificate profiles: ${url}`);
+      const response = await axios.get(url, { timeout: 5000 });
+      if (response.data && response.data.rms) {
+        options.polarData = response.data.rms;
         resolveLivePolarTargets();
-=======
-  function startEngineLoop(recoveryMultiplier) {
-    if (simInterval) clearInterval(simInterval);
-    
-    simInterval = setInterval(() => {
-      // Simulator Fallback Loop: Fires if live instrumentation feeds are idle
-      if (unsubscribes.length === 0) {
-        executeSimulationPhysics();
->>>>>>> parent of 5472b8f (fix borken plug)
+        app.debug('ORC polar data curves populated successfully.');
       }
     } catch (err) {
-      app.error('ORC API retrieval failed: ' + err.message);
+      app.error('ORC API retrieval failed, defaulting to backup parameters: ' + (err && err.message));
       orcTargetSTW = options.targetSpeedKnots || 7.80;
     }
   }
@@ -201,16 +97,19 @@ module.exports = function (app) {
     try {
       let vpp = options.polarData;
       if (vpp.vmgUpwind && Array.isArray(vpp.vmgUpwind)) {
-        let target = vpp.vmgUpwind.find(item => twsKnots <= item.tws);
-        if (target) orcTargetSTW = target.vboat || options.targetSpeedKnots;
+        // Find first item where twsKnots <= item.tws, fallback to last
+        let target = vpp.vmgUpwind.find(item => twsKnots <= item.tws) || vpp.vmgUpwind[vpp.vmgUpwind.length - 1];
+        if (target) orcTargetSTW = target.vboat || options.targetSpeedKnots || orcTargetSTW;
       }
     } catch (e) { app.error('Error resolving ORC polar matrix: ' + e.message); }
   }
 
   function emitDelta(path, value) {
-    app.handleMessage(plugin.id, {
-      updates: [{ values: [{ path: path, value: value }] }]
-    });
+    try {
+      app.handleMessage(plugin.id, {
+        updates: [{ values: [{ path: path, value: value }] }]
+      });
+    } catch (e) { /* non-fatal */ }
   }
 
   function logTackToDatabase(summary) {
@@ -228,66 +127,36 @@ module.exports = function (app) {
     db.topTenBests.sort((a, b) => a.metersLost - b.metersLost);
     if (db.topTenBests.length > 10) db.topTenBests.pop();
     saveHistoryDatabase();
-    app.handleMessage(plugin.id, { updates: [{ values: [{ path: 'performance.maneuver.lastSummary', value: summary }] }] });
+    emitDelta('performance.maneuver.lastSummary', summary);
   }
 
-  // --- Plugin Methods ---
-=======
->>>>>>> parent of c5841df (Update index.js)
-  plugin.start = function (startOptions, restartPlugin) {
-    options = startOptions || {};
-    
-    const configDir = app.getDataDirPath();
-    historyFilePath = path.join(configDir, 'tack-history.json');
-    loadHistoryDatabase();
+  // Simple simulation physics to keep the analyzer live when no instrument data present
+  function executeSimulationPhysics() {
+    // A lightweight simulation that varies TWA and STW to stimulate state changes
+    simStep++;
+    const wobble = Math.sin(simStep / 10) * 0.2;
+    currentRudder = Math.sin(simStep / 8) * 0.1;
+    currentTWA = -0.5 + wobble; // radians
+    currentAWA = currentTWA - 0.1;
+    currentSTW = 4.0 + Math.abs(Math.cos(simStep / 15)) * 1.5;
+    // call analysis
+    runAnalysisPipeline(orcTargetSTW, globalRecoveryMultiplier);
+  }
 
-    if (options.orcUrl) {
-      fetchOrcPolarTargets(options.orcUrl);
-    } else {
-      orcTargetSTW = options.targetSpeedKnots || 7.80;
-    }
+  function startEngineLoop(recoveryMultiplier) {
+    globalRecoveryMultiplier = recoveryMultiplier || 0.95;
+    if (simInterval) clearInterval(simInterval);
 
-    // --- FIX: Derive the dynamic multiplier from user settings ---
-    let thresholdPercent = options.recoveryThreshold || 95;
-    let recoveryMultiplier = thresholdPercent / 100;
-
-    let localSub = {
-      context: 'vessels.self',
-      subscribe: [
-        { path: 'navigation.speedThroughWater', period: 100 },
-        { path: 'environment.wind.angleTrueWater', period: 100 },
-        { path: 'environment.wind.angleApparent', period: 100 },
-        { path: 'steering.rudderAngle', period: 100 },
-        { path: 'environment.wind.speedTrue', period: 500 }
-      ]
-    };
-
-    app.subscriptionmanager.subscribe(
-      localSub,
-      unsubscribes,
-      subscriptionError => { app.error('H5000 instrumentation binding error: ' + subscriptionError); },
-      delta => {
-        delta.updates.forEach(update => {
-          update.values.forEach(kv => {
-            if (kv.path === 'navigation.speedThroughWater') currentSTW = kv.value;
-            if (kv.path === 'environment.wind.angleTrueWater') currentTWA = kv.value;
-            if (kv.path === 'environment.wind.angleApparent') currentAWA = kv.value;
-            if (kv.path === 'steering.rudderAngle') currentRudder = kv.value;
-            if (kv.path === 'environment.wind.speedTrue') {
-              currentTWS = kv.value;
-              resolveLivePolarTargets(); 
-            }
-          });
-        });
+    simInterval = setInterval(() => {
+      // If no subscriptions are active, run the simulator loop to feed the analyzer
+      if (unsubscribes.length === 0) {
+        executeSimulationPhysics();
+      } else {
+        // If we have live data, still run analysis periodically
+        runAnalysisPipeline(orcTargetSTW, globalRecoveryMultiplier);
       }
-    );
-
-    startEngineLoop(recoveryMultiplier);
-  };
-
-  // ... [Keep existing fetchOrcPolarTargets, resolveLivePolarTargets, loadHistoryDatabase, saveHistoryDatabase, startEngineLoop, executeSimulationPhysics as they are] ...
-  
-  // NOTE: For the functions above, keep your existing logic exactly as it is in your current file.
+    }, 200);
+  }
 
   function runAnalysisPipeline(activeTargetSTW, recoveryMultiplier) {
     let stwKnots = currentSTW * 1.94384;
@@ -335,15 +204,121 @@ module.exports = function (app) {
     }
 
     if (currentState === 'InTurn' || currentState === 'Recovery') {
-      // ... [Keep your existing physics calculations] ...
-      
-      // --- FIX: Use the dynamic recoveryMultiplier here ---
-      if (currentState === 'Recovery' && stwKnots >= (snapshotEntrySTW * recoveryMultiplier)) {
-         // ... [Your existing logic to end the maneuver] ...
+      // update min/max
+      minSTW = Math.min(minSTW, stwKnots);
+      maxSTW = Math.max(maxSTW, stwKnots);
+      minVMG = Math.min(minVMG, vmgKnots);
+      maxVMG = Math.max(maxVMG, vmgKnots);
+
+      // simplistic criteria to move to Recovery state
+      if (currentState === 'InTurn') {
+        if (Math.abs(twaDeg) < 10) {
+          currentState = 'Recovery';
+        }
+      }
+
+      // end recovery when STW reaches threshold
+      if (currentState === 'Recovery' && stwKnots >= (snapshotEntrySTW * (recoveryMultiplier || globalRecoveryMultiplier))) {
+        // compute summary
+        let summary = {
+          type: maneuverType,
+          timestamp: new Date().toISOString(),
+          metersLost: Number(((snapshotEntrySTW - minSTW) * 10).toFixed(1)), // placeholder calc
+          recoveryDurationSec: Math.round((Date.now() - startTime) / 1000),
+          minStwKnots: Number(minSTW.toFixed(2))
+        };
+        logTackToDatabase(summary);
+        // reset state
+        currentState = 'Straight';
+        maneuverType = 'Straight';
       }
     }
+
+    // emit some live deltas for debugging/visibility
+    emitDelta('performance.maneuver.state', { state: currentState, stwKnots: Number(stwKnots.toFixed(2)), twaDeg: Number(twaDeg.toFixed(1)) });
   }
 
-  // ... [Keep emitDelta, logTackToDatabase, plugin.stop, plugin.schema as they are] ...
+  // --- Plugin Methods ---
+  plugin.start = function (startOptions, restartPlugin) {
+    options = startOptions || {};
+    const configDir = (app.getDataDirPath && app.getDataDirPath()) || '.';
+    historyFilePath = path.join(configDir, 'tack-history.json');
+    loadHistoryDatabase();
+
+    if (options.orcUrl) {
+      fetchOrcPolarTargets(options.orcUrl);
+    } else {
+      orcTargetSTW = options.targetSpeedKnots || orcTargetSTW;
+    }
+
+    // Derive the dynamic multiplier from user settings
+    let thresholdPercent = options.recoveryThreshold || 95;
+    let recoveryMultiplier = thresholdPercent / 100;
+
+    let localSub = {
+      context: 'vessels.self',
+      subscribe: [
+        { path: 'navigation.speedThroughWater', period: 100 },
+        { path: 'environment.wind.angleTrueWater', period: 100 },
+        { path: 'environment.wind.angleApparent', period: 100 },
+        { path: 'steering.rudderAngle', period: 100 },
+        { path: 'environment.wind.speedTrue', period: 500 }
+      ]
+    };
+
+    try {
+      app.subscriptionmanager.subscribe(
+        localSub,
+        unsubscribes,
+        subscriptionError => { app.error('Instrumentation binding error: ' + subscriptionError); },
+        delta => {
+          if (!delta || !delta.updates) return;
+          delta.updates.forEach(update => {
+            if (!update.values) return;
+            update.values.forEach(kv => {
+              if (kv.path === 'navigation.speedThroughWater') currentSTW = kv.value;
+              if (kv.path === 'environment.wind.angleTrueWater') currentTWA = kv.value;
+              if (kv.path === 'environment.wind.angleApparent') currentAWA = kv.value;
+              if (kv.path === 'steering.rudderAngle') currentRudder = kv.value;
+              if (kv.path === 'environment.wind.speedTrue') {
+                currentTWS = kv.value;
+                resolveLivePolarTargets(); 
+              }
+            });
+          });
+        }
+      );
+    } catch (e) {
+      app.error('Failed to subscribe to instrument feeds: ' + e.message);
+    }
+
+    startEngineLoop(recoveryMultiplier);
+  };
+
+  plugin.stop = function () {
+    try {
+      if (unsubscribes && unsubscribes.length) {
+        unsubscribes.forEach(u => { try { u(); } catch (e) {} });
+        unsubscribes = [];
+      }
+      if (simInterval) clearInterval(simInterval);
+      simInterval = null;
+      saveHistoryDatabase();
+    } catch (e) {
+      app.error('Error while stopping plugin: ' + e.message);
+    }
+  };
+
+  plugin.id = plugin.id || 'signal-k-tack-and-gybe';
+
+  plugin.schema = {
+    type: 'object',
+    properties: {
+      orcUrl: { type: 'string' },
+      targetSpeedKnots: { type: 'number' },
+      recoveryThreshold: { type: 'number' }
+    }
+  };
+
   return plugin;
 };
