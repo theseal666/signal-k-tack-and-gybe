@@ -59,6 +59,7 @@
         <div class="metric-row"><span>STW:</span><span id="valSTW" class="metric-value">0.00 kn</span></div>
         <div class="metric-row"><span>VMG:</span><span id="valVMG" class="metric-value">0.00 kn</span></div>
         <div class="metric-row"><span>AWA:</span><span id="valAWA" class="metric-value">0°</span></div>
+        <div class="metric-row"><span>Rudder:</span><span id="valRudder" class="metric-value">0.0°</span></div>
         <div class="metric-row"><span>Meters Lost:</span><span id="valLost" style="color:#ef4444;" class="metric-value">0.0 m</span></div>
       </div>
     </div>
@@ -106,6 +107,7 @@
     const stwData = Array(maxDataPoints).fill(0);
     const vmgData = Array(maxDataPoints).fill(0);
     const awaData = Array(maxDataPoints).fill(0);
+    const rudderData = Array(maxDataPoints).fill(0);
 
     let tackStartIndex = null; let recoveryEndIndex = null;
 
@@ -126,7 +128,6 @@
     try {
       const ctxChartElement = document.getElementById('timelineChart');
       if (ctxChartElement) {
-        // If a chart already exists on this canvas, destroy it first to avoid "Canvas already in use" errors
         try {
           if (typeof Chart.getChart === 'function') {
             const existing = Chart.getChart(ctxChartElement);
@@ -137,12 +138,12 @@
         } catch(e) { console.warn('Error while destroying existing chart', e); }
 
         const ctxChart = ctxChartElement.getContext('2d');
-        // Ensure annotation options object exists
         const chartOptions = {
           responsive: true, maintainAspectRatio: false,
           scales: {
             y: { type: 'linear', display: true, position: 'left', grid: { color: '#2d2d34' } },
             yAwa: { type: 'linear', display: true, position: 'right', min: -180, max: 180, grid: { drawOnChartArea: false } },
+            yRudder: { type: 'linear', display: true, position: 'right', min: -45, max: 45, grid: { drawOnChartArea: false }, ticks: { stepSize: 5 } },
             x: { display: false }
           },
           plugins: {
@@ -156,9 +157,10 @@
           data: {
             labels: labels,
             datasets: [
-              { label: 'STW (kn)', data: stwData, borderColor: '#38bdf8', borderWidth: 2, pointRadius: 0, fill: false },
-              { label: 'VMG (kn)', data: vmgData, borderColor: '#34d399', borderWidth: 2, pointRadius: 0, fill: false },
-              { label: 'AWA (deg)', data: awaData, borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa' }
+              { label: 'STW (kn)', data: stwData, borderColor: '#38bdf8', borderWidth: 2, pointRadius: 0, fill: false, yAxisID: 'y' },
+              { label: 'VMG (kn)', data: vmgData, borderColor: '#34d399', borderWidth: 2, pointRadius: 0, fill: false, yAxisID: 'y' },
+              { label: 'AWA (deg)', data: awaData, borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa' },
+              { label: 'Rudder (deg)', data: rudderData, borderColor: '#f472b6', borderWidth: 1.5, pointRadius: 0, fill: false, borderDash: [4,2], yAxisID: 'yRudder' }
             ]
           },
           options: chartOptions
@@ -169,7 +171,6 @@
       }
     } catch (e) {
       console.error('Chart initialization failed. Plugin or Chart.js version may be incompatible.', e);
-      // degrade gracefully: try a minimal chart after destroying any existing one
       try {
         const ctxChartElement = document.getElementById('timelineChart');
         if (ctxChartElement) {
@@ -210,12 +211,13 @@
       document.getElementById('wsStatus').classList.remove('disconnected');
       document.getElementById('wsStatus').classList.add('connected');
 
-      // Subscribe to both aggregate and dotted paths to ensure we receive data regardless of plugin emission shape
       ws.send(JSON.stringify({
         context: "vessels.self",
         subscribe: [
           { path: "performance.maneuver", period: 100 },
-          { path: "performance.maneuver.*", period: 100 }
+          { path: "performance.maneuver.*", period: 100 },
+          { path: "steering.rudderAngle", period: 100 },
+          { path: "environment.wind.angleApparent", period: 200 }
         ]
       }));
     };
@@ -250,6 +252,26 @@
               const p = kv.path;
               const v = kv.value;
 
+              // handle direct instrument paths for live telemetry
+              if (p === 'steering.rudderAngle') {
+                const rudderDeg = (typeof v === 'number') ? (v * 180 / Math.PI) : null;
+                if (rudderDeg !== null) {
+                  document.getElementById('valRudder').innerText = rudderDeg.toFixed(1) + '°';
+                  rudderData.push(rudderDeg); rudderData.shift();
+                }
+                return;
+              }
+
+              if (p === 'environment.wind.angleApparent') {
+                const awaDeg = (typeof v === 'number') ? (Math.abs(v * 180 / Math.PI)) : null;
+                if (awaDeg !== null) {
+                  document.getElementById('valAWA').innerText = awaDeg.toFixed(1) + '°';
+                  awaData.push(awaDeg); awaData.shift(); drawVessel(awaDeg);
+                }
+                return;
+              }
+
+              // Handle the case where plugin publishes a single 'performance.maneuver' object containing multiple fields
               if (p === 'performance.maneuver' && v && typeof v === 'object') {
                 Object.keys(v).forEach(subk => {
                   const pseudoPath = `performance.maneuver.${subk}`;
@@ -277,16 +299,17 @@
 
     function processKv(p, v) {
       if (p === 'performance.maneuver.state') {
-        // state may be nested (v.state) or direct
-        const stateVal = (v && typeof v === 'object' && ('state' in v)) ? v.state : (typeof v === 'string' ? v : (v && v.state ? v.state : undefined));
+        const stateVal = (v && typeof v === 'object' && 'state' in v) ? v.state : v;
         document.getElementById('maneuverState').innerText = stateVal || 'Ready';
         document.getElementById('maneuverState').className = `status-badge state-${stateVal || 'Ready'}`;
 
         if (v && typeof v === 'object') {
           if (typeof v.stwKnots === 'number') { document.getElementById('valSTW').innerText = v.stwKnots.toFixed(2) + ' kn'; stwData.push(v.stwKnots); stwData.shift(); }
           if (typeof v.vmgKnots === 'number') { document.getElementById('valVMG').innerText = v.vmgKnots.toFixed(2) + ' kn'; vmgData.push(v.vmgKnots); vmgData.shift(); }
-          if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(v.twaDeg); awaData.shift(); drawVessel(v.twaDeg); }
+          if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(Math.abs(v.twaDeg)); awaData.shift(); drawVessel(v.twaDeg); }
           if (typeof v.metersLostAccum === 'number') document.getElementById('valLost').innerText = v.metersLostAccum.toFixed(1) + ' m';
+          // support optional embedded rudder in state
+          if (typeof v.rudderDeg === 'number') { document.getElementById('valRudder').innerText = v.rudderDeg.toFixed(1) + '°'; rudderData.push(v.rudderDeg); rudderData.shift(); }
         }
 
         if (lastState === 'Ready' && stateVal === 'InTurn') { tackStartIndex = maxDataPoints - 1; recoveryEndIndex = null; }
@@ -341,7 +364,7 @@
     drawVessel(-40);
 
     // Expose for debugging in console
-    window._tackDashboard = { ws, chart, stwData, vmgData, awaData };
+    window._tackDashboard = { ws, chart, stwData, vmgData, awaData, rudderData };
   </script>
 </body>
 </html>
