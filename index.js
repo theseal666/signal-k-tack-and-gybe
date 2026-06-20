@@ -26,6 +26,11 @@ module.exports = function (app) {
   let inTurnTimestamp = null;
   let recoveryStartTimestamp = null;
 
+  // candidate/pending timers for hysteresis
+  let candidatePendingSince = null; // when a potential turn was first detected
+  let pendingSince = null; // actual Pending enter time
+  let recoveryConfirmSince = null; // when recovery condition first met
+
   // snapshot entry values (knots/degrees)
   let snapshotEntrySTW = null; // knots
   let snapshotEntryVMG = null; // knots
@@ -170,14 +175,17 @@ module.exports = function (app) {
 
   // State machine parameters (tweakable)
   const CFG = {
-    turnStartDeltaDeg: 5, // minimal steering induced AWA change to consider starting a turn
+    turnStartDeltaDeg: 5, // minimal steering induced AWA/TWA change to consider starting a turn
+    pendingConfirmSec: 0.6, // require sustained condition before entering Pending
     pendingMaxSec: 10,
     crossThresholdDeg: 15, // threshold near 0deg to consider crossing
+    crossConfirmSec: 0.2, // require short confirmation for crossing
     settleAngleDeg: 8, // considered settled on new tack
     recoveryThreshold: 0.95, // fraction of entry STW to consider recovered
+    recoveryConfirmSec: 1.0, // require sustained recovery speed
     deadZoneDeg: 20,
     minSpeedKnots: 0.5,
-    minInturnSec: 0.3,
+    minInturnSec: 0.8, // require at least this long in InTurn before settling
     maxManeuverSec: 300
   };
 
@@ -186,6 +194,7 @@ module.exports = function (app) {
 
   function resetManeuverState() {
     entryTimestamp = null; inTurnTimestamp = null; recoveryStartTimestamp = null;
+    candidatePendingSince = null; pendingSince = null; recoveryConfirmSince = null;
     snapshotEntrySTW = null; snapshotEntryVMG = null; snapshotEntryAWA = null;
     minSTW = 999; maxSTW = 0; minVMG = 999; maxVMG = -999; maxOverturnTWA = 0; timeInDeadZone = 0;
     actualDistanceMeters = 0; theoreticalDistanceMeters = 0; actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0; metersLostAccum = 0;
@@ -216,43 +225,63 @@ module.exports = function (app) {
     rollingHistory.push({ ts: now, stw_kn: Number(stw_kn.toFixed(3)), vmg_kn: Number(vmg_kn.toFixed(3)), twa_deg: Number(twa_deg.toFixed(2)) });
     if (rollingHistory.length > BUFFER_SIZE) rollingHistory.shift();
 
-    // ENTRY detection: from Straight -> Pending
+    // ENTRY detection: from Straight -> Pending with hysteresis
     if (currentState === 'Straight') {
-      // start turning when rudder or AWA deviation is seen and speed is sufficient
-      const recent = rollingHistory[0] || { stw_kn, vmg_kn, twa_deg };
-      const awaDeviation = Math.abs(awa_deg - (snapshotEntryAWA || awa_deg));
-      // simple heuristic: significant rudder or AWA change
-      if ((Math.abs(deg(currentRudder)) > 6 || Math.abs(twa_deg - recent.twa_deg) > CFG.turnStartDeltaDeg) && stw_kn >= CFG.minSpeedKnots) {
-        currentState = 'Pending';
-        entryTimestamp = now;
-        // snapshot base from the median of rolling history (use earliest for consistency)
-        const base = rollingHistory[Math.max(0, rollingHistory.length - 1 - Math.floor(BUFFER_SIZE/4))] || recent;
-        snapshotEntrySTW = base.stw_kn;
-        snapshotEntryVMG = base.vmg_kn;
-        snapshotEntryAWA = Math.abs(base.twa_deg);
-        maneuverSnapshots = [];
-        // reset integrators
-        minSTW = stw_kn; maxSTW = stw_kn; minVMG = vmg_kn; maxVMG = vmg_kn; maxOverturnTWA = 0; timeInDeadZone = 0;
-        actualDistanceMeters = 0; theoreticalDistanceMeters = 0; actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0; metersLostAccum = 0;
+      const recent = rollingHistory[Math.max(0, rollingHistory.length - 1)] || { stw_kn, vmg_kn, twa_deg };
+      const rudderDeg = Math.abs(deg(currentRudder));
+      const twaDelta = Math.abs(twa_deg - (recent.twa_deg || twa_deg));
+      const candidate = ((rudderDeg > 6) || (twaDelta > CFG.turnStartDeltaDeg)) && stw_kn >= CFG.minSpeedKnots;
+
+      if (candidate) {
+        if (!candidatePendingSince) candidatePendingSince = now;
+        const elapsed = (now - candidatePendingSince) / 1000.0;
+        if (elapsed >= CFG.pendingConfirmSec) {
+          // enter Pending
+          currentState = 'Pending';
+          entryTimestamp = now;
+          pendingSince = now;
+          // snapshot base from an earlier point in history (a few samples back)
+          const baseIdx = Math.max(0, rollingHistory.length - 6);
+          const base = rollingHistory[baseIdx] || recent;
+          snapshotEntrySTW = base.stw_kn;
+          snapshotEntryVMG = base.vmg_kn;
+          snapshotEntryAWA = Math.abs(base.twa_deg);
+          maneuverSnapshots = [];
+          minSTW = stw_kn; maxSTW = stw_kn; minVMG = vmg_kn; maxVMG = vmg_kn; maxOverturnTWA = 0; timeInDeadZone = 0;
+          actualDistanceMeters = 0; theoreticalDistanceMeters = 0; actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0; metersLostAccum = 0;
+        }
+      } else {
+        candidatePendingSince = null; // reset candidate
       }
     }
 
-    // PENDING -> InTurn detection
+    // PENDING -> InTurn detection (require short confirmation)
     if (currentState === 'Pending') {
-      const timeInPending = (now - entryTimestamp) / 1000.0;
+      const timeInPending = (now - (pendingSince || entryTimestamp || now)) / 1000.0;
       const oldest = rollingHistory[0] || { twa_deg };
       const signChange = (oldest.twa_deg < 0 && twa_deg > 0) || (oldest.twa_deg > 0 && twa_deg < 0);
-      if (signChange || Math.abs(twa_deg) < CFG.crossThresholdDeg) {
-        currentState = 'InTurn';
-        inTurnTimestamp = now;
-        maneuverType = 'Tack';
-        // ensure snapshotEntry values initialized
-        if (!snapshotEntrySTW) snapshotEntrySTW = stw_kn;
-        if (!snapshotEntryVMG) snapshotEntryVMG = vmg_kn;
-      } else if (timeInPending > CFG.pendingMaxSec || Math.abs(twa_deg) > 60) {
-        // abort false alarm
-        currentState = 'Straight';
-        resetManeuverState();
+      const crossing = signChange || Math.abs(twa_deg) < CFG.crossThresholdDeg;
+
+      if (crossing) {
+        // short confirmation window
+        if (!inTurnTimestamp) inTurnTimestamp = now; // reuse as confirm timer
+        const crossedFor = (now - inTurnTimestamp) / 1000.0;
+        if (crossedFor >= CFG.crossConfirmSec) {
+          currentState = 'InTurn';
+          maneuverType = 'Tack';
+          // ensure snapshotEntry values initialized
+          if (!snapshotEntrySTW) snapshotEntrySTW = stw_kn;
+          if (!snapshotEntryVMG) snapshotEntryVMG = vmg_kn;
+          // set inTurnTimestamp properly
+          inTurnTimestamp = now;
+        }
+      } else {
+        // not crossing yet - if pending takes too long abort
+        inTurnTimestamp = null;
+        if (timeInPending > CFG.pendingMaxSec || Math.abs(twa_deg) > 60) {
+          currentState = 'Straight';
+          resetManeuverState();
+        }
       }
     }
 
@@ -278,45 +307,60 @@ module.exports = function (app) {
       // transition InTurn -> Recovery: when AWA settles away from crossing (within settleAngleDeg)
       if (currentState === 'InTurn') {
         const settled = Math.abs(twa_deg) > CFG.settleAngleDeg && (Date.now() - inTurnTimestamp) / 1000.0 > CFG.minInturnSec;
-        if (settled && Math.abs(twa_deg) > CFG.settleAngleDeg) {
+        if (settled) {
           currentState = 'Recovery';
           recoveryStartTimestamp = Date.now();
+          recoveryConfirmSince = null;
         }
       }
 
-      // transition Recovery -> Straight when STW reaches threshold or timeout
+      // transition Recovery -> Straight when STW reaches threshold, require sustained condition
       if (currentState === 'Recovery') {
-        const recovered = stw_kn >= (snapshotEntrySTW * (recoveryMultiplier || globalRecoveryMultiplier));
-        const elapsed = (now - (inTurnTimestamp || entryTimestamp || now)) / 1000.0;
-        if (recovered || elapsed > CFG.maxManeuverSec) {
-          const totalDuration = Number(((now - (inTurnTimestamp || entryTimestamp || now)) / 1000.0).toFixed(1));
-          const metersLost = Number(Math.max(metersLostAccum, theoreticalDistanceMeters - actualDistanceMeters).toFixed(1));
+        const recoveredNow = stw_kn >= (snapshotEntrySTW * (recoveryMultiplier || globalRecoveryMultiplier));
+        if (recoveredNow) {
+          if (!recoveryConfirmSince) recoveryConfirmSince = now;
+          const held = (now - recoveryConfirmSince) / 1000.0 >= CFG.recoveryConfirmSec;
+          if (held) {
+            const totalDuration = Number(((now - (inTurnTimestamp || entryTimestamp || now)) / 1000.0).toFixed(1));
+            const metersLost = Number(Math.max(metersLostAccum, theoreticalDistanceMeters - actualDistanceMeters).toFixed(1));
 
-          const summary = {
-            type: maneuverType,
-            timestamp: new Date().toISOString(),
-            durationSec: totalDuration,
-            metersLost: metersLost,
-            recoveryDurationSec: Number(((now - (inTurnTimestamp || entryTimestamp)) / 1000.0).toFixed(1)),
-            minStwKnots: Number(minSTW.toFixed(2)),
-            maxStwKnots: Number(maxSTW.toFixed(2)),
-            minVmgKnots: Number(minVMG.toFixed(3)),
-            maxVmgKnots: Number(maxVMG.toFixed(3)),
-            maxOverturnTWA: Number(maxOverturnTWA.toFixed(1)),
-            timeInDeadZoneSec: Number(timeInDeadZone.toFixed(2)),
-            actualDistanceMeters: Number(actualDistanceMeters.toFixed(2)),
-            theoreticalDistanceMeters: Number(theoreticalDistanceMeters.toFixed(2)),
-            actualVmgDistanceMeters: Number(actualVmgDistanceMeters.toFixed(2)),
-            theoreticalVmgDistanceMeters: Number(theoreticalVmgDistanceMeters.toFixed(2)),
-            samples: maneuverSnapshots.length
-          };
+            const summary = {
+              type: maneuverType,
+              timestamp: new Date().toISOString(),
+              durationSec: totalDuration,
+              metersLost: metersLost,
+              recoveryDurationSec: Number(((now - (inTurnTimestamp || entryTimestamp)) / 1000.0).toFixed(1)),
+              minStwKnots: Number(minSTW.toFixed(2)),
+              maxStwKnots: Number(maxSTW.toFixed(2)),
+              minVmgKnots: Number(minVMG.toFixed(3)),
+              maxVmgKnots: Number(maxVMG.toFixed(3)),
+              maxOverturnTWA: Number(maxOverturnTWA.toFixed(1)),
+              timeInDeadZoneSec: Number(timeInDeadZone.toFixed(2)),
+              actualDistanceMeters: Number(actualDistanceMeters.toFixed(2)),
+              theoreticalDistanceMeters: Number(theoreticalDistanceMeters.toFixed(2)),
+              actualVmgDistanceMeters: Number(actualVmgDistanceMeters.toFixed(2)),
+              theoreticalVmgDistanceMeters: Number(theoreticalVmgDistanceMeters.toFixed(2)),
+              samples: maneuverSnapshots.length
+            };
 
-          persistSummary(summary);
+            persistSummary(summary);
 
-          // reset to Straight and keep rolling history
-          currentState = 'Straight';
-          maneuverType = 'Straight';
-          resetManeuverState();
+            // reset to Straight and keep rolling history
+            currentState = 'Straight';
+            maneuverType = 'Straight';
+            resetManeuverState();
+          }
+        } else {
+          recoveryConfirmSince = null; // reset if condition lost
+          const elapsed = (now - (inTurnTimestamp || entryTimestamp || now)) / 1000.0;
+          if (elapsed > CFG.maxManeuverSec) {
+            // timeout: finalize anyway
+            const totalDuration = Number(((now - (inTurnTimestamp || entryTimestamp || now)) / 1000.0).toFixed(1));
+            const metersLost = Number(Math.max(metersLostAccum, theoreticalDistanceMeters - actualDistanceMeters).toFixed(1));
+            const summary = { type: maneuverType, timestamp: new Date().toISOString(), durationSec: totalDuration, metersLost: metersLost, recoveryDurationSec: Number(((now - (inTurnTimestamp || entryTimestamp)) / 1000.0).toFixed(1)), minStwKnots: Number(minSTW.toFixed(2)), maxStwKnots: Number(maxSTW.toFixed(2)), minVmgKnots: Number(minVMG.toFixed(3)), maxVmgKnots: Number(maxVMG.toFixed(3)), maxOverturnTWA: Number(maxOverturnTWA.toFixed(1)), timeInDeadZoneSec: Number(timeInDeadZone.toFixed(2)), actualDistanceMeters: Number(actualDistanceMeters.toFixed(2)), theoreticalDistanceMeters: Number(theoreticalDistanceMeters.toFixed(2)), actualVmgDistanceMeters: Number(actualVmgDistanceMeters.toFixed(2)), theoreticalVmgDistanceMeters: Number(theoreticalVmgDistanceMeters.toFixed(2)), samples: maneuverSnapshots.length };
+            persistSummary(summary);
+            currentState = 'Straight'; maneuverType = 'Straight'; resetManeuverState();
+          }
         }
       }
     }
