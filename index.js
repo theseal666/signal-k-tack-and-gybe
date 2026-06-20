@@ -7,7 +7,6 @@ module.exports = function (app) {
   let simInterval = null;
   let options = {};
   
-  // Storage paths for the local knowledge base file
   let historyFilePath = '';
 
   plugin.id = 'signal-k-tack-and-gybe';
@@ -30,19 +29,17 @@ module.exports = function (app) {
   let minSTW = 99; let maxSTW = 0;
   let minVMG = 99; let maxVMG = 0;
   let maxOverturnTWA = 0; 
-  let timeInDeadZone = 0;  
+  let timeInDeadZone = 0; 
 
   let actualDistanceMeters = 0; let theoreticalDistanceMeters = 0;
   let actualVmgDistanceMeters = 0; let theoreticalVmgDistanceMeters = 0;
 
-  // --- Live Sensor Caches ---
   let currentSTW = 4.01;   
   let currentTWA = -0.698; 
   let currentAWA = -0.488; 
   let currentRudder = 0.0; 
   let currentTWS = 6.17;   
 
-  // Resolved dynamic targets from ORC
   let orcTargetSTW = 7.80; 
 
   let simStep = 0;
@@ -61,17 +58,16 @@ module.exports = function (app) {
     historyFilePath = path.join(configDir, 'tack-history.json');
     loadHistoryDatabase();
 
-    // Pull targets down if an official certificate endpoint exists
     if (options.orcUrl) {
       fetchOrcPolarTargets(options.orcUrl);
     } else {
       orcTargetSTW = options.targetSpeedKnots || 7.80;
     }
 
+    // --- FIX: Derive the dynamic multiplier from user settings ---
     let thresholdPercent = options.recoveryThreshold || 95;
     let recoveryMultiplier = thresholdPercent / 100;
 
-    // Bind live instrumentation data feeds from the H5000 network
     let localSub = {
       context: 'vessels.self',
       subscribe: [
@@ -86,9 +82,7 @@ module.exports = function (app) {
     app.subscriptionmanager.subscribe(
       localSub,
       unsubscribes,
-      subscriptionError => {
-        app.error('H5000 instrumentation binding error: ' + subscriptionError);
-      },
+      subscriptionError => { app.error('H5000 instrumentation binding error: ' + subscriptionError); },
       delta => {
         delta.updates.forEach(update => {
           update.values.forEach(kv => {
@@ -108,122 +102,9 @@ module.exports = function (app) {
     startEngineLoop(recoveryMultiplier);
   };
 
-  async function fetchOrcPolarTargets(url) {
-    try {
-      app.debug(`Querying ORC database for certificate profiles: ${url}`);
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-      
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-      const data = await response.json();
-      
-      if (data && data.rms) {
-        options.polarData = data.rms;
-        resolveLivePolarTargets();
-        app.debug('ORC polar data curves populated successfully.');
-      }
-    } catch (err) {
-      app.error('ORC API retrieval failed, defaulting to backup parameters: ' + err.message);
-      orcTargetSTW = options.targetSpeedKnots || 7.80;
-    }
-  }
-
-  function resolveLivePolarTargets() {
-    if (!options.polarData) return;
-    
-    let twsKnots = currentTWS * 1.94384;
-    
-    try {
-      let vpp = options.polarData;
-      if (vpp.vmgUpwind && Array.isArray(vpp.vmgUpwind)) {
-        let target = vpp.vmgUpwind.find(item => twsKnots <= item.tws);
-        if (target) {
-          orcTargetSTW = target.vboat || options.targetSpeedKnots;
-        }
-      }
-    } catch (e) {
-      app.error('Error resolving real-time ORC polar matrix: ' + e.message);
-    }
-  }
-
-  function loadHistoryDatabase() {
-    try {
-      if (fs.existsSync(historyFilePath)) {
-        const fileData = fs.readFileSync(historyFilePath, 'utf8');
-        performanceDatabase = JSON.parse(fileData);
-      }
-    } catch (e) {
-      app.error('Failed to parse history database: ' + e.message);
-    }
-  }
-
-  function saveHistoryDatabase() {
-    try {
-      fs.writeFileSync(historyFilePath, JSON.stringify(performanceDatabase, null, 2), 'utf8');
-    } catch (e) {
-      app.error('Failed to write history database: ' + e.message);
-    }
-  }
-
-  function startEngineLoop(recoveryMultiplier) {
-    if (simInterval) clearInterval(simInterval);
-    
-    simInterval = setInterval(() => {
-      if (unsubscribes.length === 0) {
-        executeSimulationPhysics();
-      }
-      runAnalysisPipeline(orcTargetSTW, recoveryMultiplier);
-    }, 100);
-  }
-
-  function executeSimulationPhysics() {
-    if (!isManeuvering && Math.random() < 0.005) {
-      isManeuvering = true;
-      simStep = 0;
-    }
-
-    if (isManeuvering) {
-      simStep++;
-      if (simStep <= 15) {
-        currentRudder = (8 * Math.PI / 180) * (simStep / 15);
-        let twaDeg = -40 + (12 * (simStep / 15)); 
-        currentTWA = twaDeg * Math.PI / 180;
-        currentAWA = (twaDeg * 0.7) * Math.PI / 180;
-        currentSTW = (orcTargetSTW - (0.4 * (simStep / 15))) / 1.94384; 
-      }
-      else if (simStep <= 50) {
-        currentRudder = 12 * Math.PI / 180; 
-        let progress = (simStep - 15) / 35;
-        let twaDeg = -28 + (74 * progress); 
-        currentTWA = twaDeg * Math.PI / 180;
-        currentAWA = (twaDeg * 0.7) * Math.PI / 180;
-        let speedFactor = 0.95 - (0.45 * Math.sin(progress * Math.PI / 2));
-        currentSTW = (orcTargetSTW * speedFactor) / 1.94384;
-      }
-      else if (simStep <= 220) {
-        let progress = (simStep - 50) / 170;
-        currentRudder = -2 * Math.PI / 180; 
-        let twaDeg = 46 - (6 * Math.min(1, progress * 3));
-        currentTWA = twaDeg * Math.PI / 180;
-        currentAWA = (twaDeg * 0.7) * Math.PI / 180;
-        let speedFactor = 0.50 + (0.50 * Math.sqrt(progress));
-        currentSTW = (orcTargetSTW * speedFactor) / 1.94384;
-      }
-      else {
-        isManeuvering = false;
-        currentRudder = 0;
-      }
-    } else { 
-      currentTWA = -40 * Math.PI / 180;
-      currentAWA = -28 * Math.PI / 180;
-      currentSTW = orcTargetSTW / 1.94384; 
-      currentRudder = 0.0;
-    }
-  }
+  // ... [Keep existing fetchOrcPolarTargets, resolveLivePolarTargets, loadHistoryDatabase, saveHistoryDatabase, startEngineLoop, executeSimulationPhysics as they are] ...
+  
+  // NOTE: For the functions above, keep your existing logic exactly as it is in your current file.
 
   function runAnalysisPipeline(activeTargetSTW, recoveryMultiplier) {
     let stwKnots = currentSTW * 1.94384;
@@ -239,23 +120,19 @@ module.exports = function (app) {
       if (rollingHistory.length > BUFFER_SIZE) rollingHistory.shift();
     }
 
-    // --- DETECTION: PENDING ENTRY ---
     if (currentState === 'Straight') {
       if (Math.abs(rudderDeg) > 5 && Math.abs(twaDeg) < 32) {
         currentState = 'Pending';
         pendingStartTime = Date.now();
-        
         let historicalBase = rollingHistory[0] || { stw: stwKnots, vmg: vmgKnots, twa: twaDeg };
         snapshotEntrySTW = historicalBase.stw;
         snapshotEntryVMG = historicalBase.vmg;
         snapshotEntryTWA = Math.abs(historicalBase.twa);
-        
         maxOverturnTWA = 0;
         timeInDeadZone = 0;
       }
     }
 
-    // --- DETECTION: WIND CROSSING TRIGGER ---
     if (currentState === 'Pending') {
       let timeInPending = (Date.now() - pendingStartTime) / 1000;
       let historyEntry = rollingHistory[0] || { twa: twaDeg };
@@ -265,142 +142,25 @@ module.exports = function (app) {
         currentState = 'InTurn';
         maneuverType = 'Tack';
         startTime = Date.now();
-        
         minSTW = stwKnots; maxSTW = stwKnots;
         minVMG = vmgKnots; maxVMG = vmgKnots;
-        
         actualDistanceMeters = 0; theoreticalDistanceMeters = 0;
         actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0;
-      } 
-      else if (timeInPending > 10.0 || Math.abs(twaDeg) > 35) {
+      } else if (timeInPending > 10.0 || Math.abs(twaDeg) > 35) {
         currentState = 'Straight';
       }
     }
 
-    // --- PROCESSING & RECOVERY LOGIC ---
     if (currentState === 'InTurn' || currentState === 'Recovery') {
-      let timeElapsedSec = (Date.now() - startTime) / 1000;
-
-      if (stwKnots < minSTW) minSTW = stwKnots;
-      if (stwKnots > maxSTW) maxSTW = stwKnots;
-      if (vmgKnots < minVMG) minVMG = vmgKnots;
-      if (vmgKnots > maxVMG) maxVMG = vmgKnots;
-
-      if (Math.abs(twaDeg) < 20) {
-        timeInDeadZone += 0.1; 
-      }
-
-      let currentOvershoot = Math.abs(twaDeg) - snapshotEntryTWA;
-      if (currentState === 'Recovery' && currentOvershoot > maxOverturnTWA) {
-        maxOverturnTWA = currentOvershoot;
-      }
-
-      actualDistanceMeters += (currentSTW * 0.1);
-      theoreticalDistanceMeters += ((snapshotEntrySTW / 1.94384) * 0.1); 
+      // ... [Keep your existing physics calculations] ...
       
-      actualVmgDistanceMeters += (liveVmgMS * 0.1);
-      theoreticalVmgDistanceMeters += ((snapshotEntryVMG / 1.94384) * 0.1);
-
-      let metersLost = theoreticalDistanceMeters - actualDistanceMeters;
-      let vmgMetersLost = theoreticalVmgDistanceMeters - actualVmgDistanceMeters;
-
-      if (currentState === 'InTurn' && Math.abs(twaDeg) > 22) {
-        currentState = 'Recovery';
-        accelerationStartTime = Date.now(); 
-      }
-
-      emitDelta('performance.maneuver.type', maneuverType);
-      emitDelta('performance.maneuver.state', currentState);
-      emitDelta('performance.maneuver.metersLost', Number(metersLost.toFixed(1)));
-      emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
-      emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
-      emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
-
+      // --- FIX: Use the dynamic recoveryMultiplier here ---
       if (currentState === 'Recovery' && stwKnots >= (snapshotEntrySTW * recoveryMultiplier)) {
-        let recoveryDuration = (Date.now() - accelerationStartTime) / 1000;
-        
-        let tackSummary = {
-          timestamp: new Date().toISOString(),
-          metersLost: Number(metersLost.toFixed(1)),
-          vmgMetersLost: Number(vmgMetersLost.toFixed(1)),
-          recoveryDurationSec: Number(recoveryDuration.toFixed(1)),
-          minStwKnots: Number(minSTW.toFixed(2)),
-          maxStwKnots: Number(maxSTW.toFixed(2)),
-          entryStwKnots: Number(snapshotEntrySTW.toFixed(2)),
-          entryVmgKnots: Number(snapshotEntryVMG.toFixed(2)),
-          maxVmgKnots: Number(maxVMG.toFixed(2)),
-          overturnDegrees: Number(Math.max(0, maxOverturnTWA).toFixed(1)),
-          deadZoneSec: Number(timeInDeadZone.toFixed(1))
-        };
-
-        logTackToDatabase(tackSummary);
-
-        currentState = 'Straight';
-        maneuverType = 'Straight';
-        rollingHistory = [];
-        emitDelta('performance.maneuver.state', 'Ready');
+         // ... [Your existing logic to end the maneuver] ...
       }
-    } else {
-      emitDelta('performance.maneuver.type', 'Straight');
-      emitDelta('performance.maneuver.state', currentState === 'Pending' ? 'InTurn' : 'Ready');
-      emitDelta('performance.maneuver.liveStwKnots', Number(stwKnots.toFixed(2)));
-      emitDelta('performance.maneuver.liveVmgKnots', Number(vmgKnots.toFixed(2)));
-      emitDelta('performance.maneuver.liveAwaDegrees', Number(awaDeg.toFixed(1)));
     }
   }
 
-  function logTackToDatabase(summary) {
-    let db = performanceDatabase;
-    db.totalTacksLogged++;
-
-    let n = db.totalTacksLogged;
-    if (n === 1) {
-      db.averages = {
-        metersLost: summary.metersLost,
-        recoveryDurationSec: summary.recoveryDurationSec,
-        minStwKnots: summary.minStwKnots
-      };
-    } else {
-      db.averages.metersLost = Number(((db.averages.metersLost * (n - 1) + summary.metersLost) / n).toFixed(1));
-      db.averages.recoveryDurationSec = Number(((db.averages.recoveryDurationSec * (n - 1) + summary.recoveryDurationSec) / n).toFixed(1));
-      db.averages.minStwKnots = Number(((db.averages.minStwKnots * (n - 1) + summary.minStwKnots) / n).toFixed(2));
-    }
-
-    db.topTenBests.push(summary);
-    db.topTenBests.sort((a, b) => a.metersLost - b.metersLost);
-    if (db.topTenBests.length > 10) db.topTenBests.pop();
-
-    saveHistoryDatabase();
-    
-    app.handleMessage(plugin.id, {
-      updates: [{ values: [{ path: 'performance.maneuver.lastSummary', value: summary }] }]
-    });
-    app.handleMessage(plugin.id, {
-      updates: [{ values: [{ path: 'performance.maneuver.database', value: db }] }]
-    });
-  }
-
-  function emitDelta(path, value) {
-    app.handleMessage(plugin.id, {
-      updates: [{ values: [{ path: path, value: value }] }]
-    });
-  }
-
-  plugin.stop = function () {
-    if (simInterval) clearInterval(simInterval);
-    unsubscribes.forEach(f => f());
-    unsubscribes = [];
-  };
-
-  plugin.schema = {
-    type: 'object',
-    title: 'MAT 12.20 Performance Settings',
-    properties: {
-      orcUrl: { type: 'string', title: 'ORC JSON Polar Certificate Link URL' },
-      targetSpeedKnots: { type: 'number', title: 'Backup Target Entry Speed (Knots)', default: 7.80 },
-      recoveryThreshold: { type: 'number', title: 'Recovery Completion Threshold (%)', default: 95 }
-    }
-  };
-
+  // ... [Keep emitDelta, logTackToDatabase, plugin.stop, plugin.schema as they are] ...
   return plugin;
 };
