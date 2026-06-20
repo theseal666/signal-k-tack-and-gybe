@@ -83,65 +83,78 @@ Quick local test (one-liner)
 
 ## Easy install (for sailors / non‑technical users)
 
-Follow one of the two simple methods below. Pick the method that matches how you access your Signal K server (Raspberry Pi or similar Linux host is common).
+Follow the simple method below to install the plugin into your Signal K user folder. The installer will place the plugin in `~/.signalk/node_modules/signal-k-tack-and-gybe` and try to restart Signal K.
 
 Prerequisites
 
 - A running Signal K server (e.g., installed on a Raspberry Pi).
 - Node.js and npm installed on the same machine running Signal K (Node 16+ / 18+ recommended).
-- SSH access to the machine or a terminal on the device.
+- git and curl or wget available.
+- You must run the installer as the same user that runs Signal K (this ensures file ownership and permissions are correct). If you are unsure which user runs Signal K, check:
 
-Method A — Recommended (copy into Signal K user plugins folder)
+  ps aux | grep signalk-server | grep -v grep
 
-1. SSH to your Signal K machine (or open a terminal).
-2. Download this plugin into your home folder:
+  or inspect the Signal K data directory owner:
 
-   git clone https://github.com/theseal666/Signal-k-tack-and-gybe.git
+  ls -ld ~/.signalk
 
-3. Install Node dependencies for the plugin:
+If Signal K runs as user `node` (common on Pi images), switch to that user or run the installer as that user using `sudo -u node -s`.
 
-   cd Signal-k-tack-and-gybe
-   npm install
+Single-line installer (recommended)
 
-4. Copy the plugin folder into your Signal K user node_modules directory (create if missing):
+Interactive (prompts before running):
 
-   mkdir -p ~/.signalk/node_modules
-   cp -r $(pwd) ~/.signalk/node_modules/signal-k-tack-and-gybe
+curl -fsSL https://raw.githubusercontent.com/theseal666/signal-k-tack-and-gybe/main/install.sh | bash
 
-5. Restart the Signal K server to pick up the new plugin. Depending on how you installed Signal K, one of these will work:
+Non-interactive (auto yes):
 
-   sudo systemctl restart signalk    # common for systemd / Debian installs
-   sudo service signalk restart      # some systems
-   # OR reboot the Pi: sudo reboot
+curl -fsSL https://raw.githubusercontent.com/theseal666/signal-k-tack-and-gybe/main/install.sh | bash -s -- --yes
 
-6. After restart, open your Signal K admin UI (usually http://<your-pi-ip>:3000) → Plugins and enable/configure "Tack and Gybe Performance Analyzer".
+If `curl` is not available, use `wget`:
 
-Method B — Alternative (npm link / development install)
+wget -qO- https://raw.githubusercontent.com/theseal666/signal-k-tack-and-gybe/main/install.sh | bash
 
-Use this if you want to develop or prefer a linked installation.
+What the installer does
 
-1. On the Signal K machine, clone the repo and install deps:
+- Clones the repository to a temporary folder.
+- Runs `npm install --production` inside the plugin folder to install required dependencies (including `axios`).
+- Copies the plugin into `~/.signalk/node_modules/signal-k-tack-and-gybe`.
+- Attempts to restart Signal K (best-effort via `systemctl`).
 
-   git clone https://github.com/theseal666/Signal-k-tack-and-gybe.git
-   cd Signal-k-tack-and-gybe
-   npm install
+Permissions notes
 
-2. Link it globally and into the Signal K installation:
+- Run the installer as the Signal K user so files are owned correctly. If you run it as root or another user, you may need to fix ownership, for example:
 
-   sudo npm link
+  sudo chown -R <signalk-user> ~/.signalk/node_modules/signal-k-tack-and-gybe
 
-   # Find where your signalk server is installed, then in that folder run:
-   # sudo npm link signal-k-tack-and-gybe
+Replace `<signalk-user>` with the account the Signal K process runs under.
 
-   # If you installed Signal K globally you can do:
-   cd $(npm root -g)/signalk-node-server || true
-   sudo npm link signal-k-tack-and-gybe || true
+## Updating the plugin from Git
 
-3. Restart Signal K as in Method A.
+If you installed the plugin using the installer above, the easiest update is to re-run the installer (it will pull the latest files and reinstall dependencies). To update manually via git, only use the steps below if your plugin directory is a git checkout (you cloned it there):
 
-Quick checks after install
+1. Stop Signal K (optional but recommended):
 
-- Verify the plugin folder exists:
+   sudo systemctl stop signalk
+
+2. Pull latest changes and reinstall deps:
+
+   cd ~/.signalk/node_modules/signal-k-tack-and-gybe
+   git fetch origin
+   git reset --hard origin/main
+   npm install --production
+
+3. Start Signal K again:
+
+   sudo systemctl start signalk
+
+Alternative quick update (re-run installer):
+
+curl -fsSL https://raw.githubusercontent.com/theseal666/signal-k-tack-and-gybe/main/install.sh | bash -s -- --yes
+
+## Quick checks after install
+
+- Verify plugin folder exists:
 
   ls ~/.signalk/node_modules/signal-k-tack-and-gybe
 
@@ -150,7 +163,7 @@ Quick checks after install
   cd ~/.signalk/node_modules/signal-k-tack-and-gybe
   ls node_modules | grep axios
 
-- Check for `tack-history.json` in Signal K data dir (this file is created after the first logged maneuver):
+- Check for `tack-history.json` in Signal K data dir (created after first logged maneuver):
 
   ls $(node -e "console.log(require('os').homedir() + '/.signalk')")/tack-history.json || echo "no history yet"
 
@@ -158,29 +171,11 @@ Quick checks after install
 
   sudo journalctl -u signalk -f    # follow logs on systemd systems
 
-If something goes wrong
+## Troubleshooting
 
-- Ensure Node and npm versions are recent.
-- Ensure the plugin folder is owned by the same user that runs the Signal K process (permission issues cause silent failures).
-- If the UI does not show the plugin, restart Signal K and check logs (journalctl or /var/log/syslog).
-- If the plugin appears but emits no deltas, confirm your instruments or sim plugin publish numeric values on the required paths.
+- If Signal K fails to load the plugin with `MODULE_NOT_FOUND` and the path references `signal-k-tack-and-gybe`, check the folder name under `~/.signalk/node_modules/` — it must be exactly `signal-k-tack-and-gybe` (lowercase).
+- If ORC polar JSON parsing fails with an "Unexpected token" at the start, the remote JSON likely contains a UTF‑8 BOM; I can update the plugin to trim it automatically or you can remove the BOM from the source file.
 
 ---
 
-## Quick install script one-liners (optional)
-
-Interactive (prompts before running):
-
-curl -fsSL https://raw.githubusercontent.com/theseal666/Signal-k-tack-and-gybe/main/install.sh | bash
-
-Non-interactive (auto yes):
-
-curl -fsSL https://raw.githubusercontent.com/theseal666/Signal-k-tack-and-gybe/main/install.sh | bash -s -- --yes
-
-If curl is not available, use wget:
-
-wget -qO- https://raw.githubusercontent.com/theseal666/Signal-k-tack-and-gybe/main/install.sh | bash
-
----
-
-If you want more screenshots, a compact mobile UI, or a small harness to replay example delta payloads for demo/testing, tell me and I'll add them.
+If you want screenshots, a compact mobile UI, or a small harness to replay example delta payloads for demo/testing, tell me and I'll add them.
