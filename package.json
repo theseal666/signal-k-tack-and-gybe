@@ -1,10 +1,18 @@
 {
-  "name": "signal-k-tack-and-gybe",
-  "version": "1.0.0",
-  "description": "Analyzes tacks and gybes using high-frequency H5000 data.",
+  "name": "signalk-tack-and-gybe",
+  "version": "0.2.0",
+  "description": "Detects and measures tacks and gybes — metres lost, recovery time, and a persistent Top-10 leaderboard.",
   "main": "index.js",
+  "files": [
+    "index.js",
+    "public/",
+    "README.md"
+  ],
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "repository": {
     "type": "git",
@@ -20,11 +28,5 @@
   "bugs": {
     "url": "https://github.com/theseal666/signal-k-tack-and-gybe/issues"
   },
-  "homepage": "https://github.com/theseal666/signal-k-tack-and-gybe#readme",
-  "signalk": {
-    "appIcon": "./icon.png"
-  },
-  "dependencies": {
-    "axios": "^1.4.0"
-  }
+  "homepage": "https://github.com/theseal666/signal-k-tack-and-gybe#readme"
 }
