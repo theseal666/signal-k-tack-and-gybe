@@ -250,8 +250,7 @@
           { path: "performance.maneuver", period: 100 },
           { path: "performance.maneuver.*", period: 100 },
           { path: "steering.rudderAngle", period: 100 },
-          { path: "environment.wind.angleApparent", period: 200 },
-          { path: "navigation.courseOverGroundTrue", period: 500 }
+          { path: "environment.wind.angleApparent", period: 200 }
         ]
       }));
     };
@@ -299,12 +298,6 @@
               if (p === 'environment.wind.angleApparent') {
                 const deg = (typeof v === 'number') ? (v * 180 / Math.PI) : null;
                 if (deg !== null) drawVessel(deg);
-                return;
-              }
-
-              if (p === 'navigation.courseOverGroundTrue') {
-                const deg = (typeof v === 'number') ? ((v * 180 / Math.PI + 360) % 360) : null;
-                if (deg !== null) { cogData.push(deg); cogData.shift(); }
                 return;
               }
 

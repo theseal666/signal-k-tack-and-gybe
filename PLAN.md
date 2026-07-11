@@ -81,6 +81,18 @@ that SK path. COG travels exclusively through `performance.maneuver.state`
 `cogDeg` field (non-null only in simulate mode). Dashboard WS subscription to
 `navigation.courseOverGroundTrue` handles real instrument COG in live mode.
 
+### ✅ M2.3 — COG double-write fix (done)
+
+Dashboard previously subscribed to `navigation.courseOverGroundTrue` directly from
+the SK WS stream AND received `cogDeg` via the state object. In sim mode with
+RaceBox running, both sources wrote to `cogData` at different rates causing the
+COG chart line to jump erratically.
+
+Fixed: removed `navigation.courseOverGroundTrue` from the dashboard WS subscribe
+list entirely. COG chart is now driven exclusively by `cogDeg` in the state object
+(non-null in sim mode only). In real mode the COG line stays blank until a proper
+instrument source (e.g. H5000 heading + COG) is wired up.
+
 ### 🔲 M3 — Publish to npm
 
 Once the first real-sailing test is done and history is validated, publish

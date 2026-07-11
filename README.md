@@ -73,7 +73,7 @@ npm install https://github.com/theseal666/signal-k-tack-and-gybe.git
 }
 ```
 
-`cogDeg` is only populated in simulation mode (derived from TWA assuming wind from south). In real mode the dashboard reads `navigation.courseOverGroundTrue` directly from the SK stream (e.g., from a RaceBox IMU).
+`cogDeg` is only populated in simulation mode (derived from TWA assuming wind from south). In real mode the COG chart line stays blank until a heading/COG instrument source (e.g. H5000 via WebSocket) is wired into SignalK.
 
 ### `performance.maneuver.lastSummary` object
 
