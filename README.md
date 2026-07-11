@@ -1,181 +1,179 @@
-# Tack and Gybe Performance Analyzer (Signal K plugin)
+# signalk-tack-and-gybe
 
-A focused Signal K plugin to analyze tacks and gybes, produce precise summary metrics, and maintain a rolling history and Top‑10 knowledge base. The analyzer is source‑agnostic: it consumes Signal K deltas (from instruments or an external sim plugin) on the same paths and does not simulate data internally.
+A Signal K server plugin that detects, measures, and archives every tack and gybe while sailing.
 
-## Quick overview
+**Answers:**
+- How many metres did this manoeuvre cost?
+- How long was recovery?
+- Is the crew getting better over time?
 
-- Rolling history: 50 samples for look‑back entry snapshots.
-- State machine: Straight → Pending → InTurn → Recovery → Straight.
-- DT‑aware integration for distance (meters) and VMG to increase precision.
-- Tracks meters lost, helm overturn and dead‑zone time.
-- Persists maneuver summaries to `tack-history.json` and maintains rolling averages + Top‑10.
+## Features
 
-## Repository layout
+- State machine: `Straight → Pending → InTurn → Recovery → Straight`
+- Separate tack and gybe leaderboards (Top 10 by fewest metres lost each)
+- Separate running averages for tacks and gybes
+- dt-aware distance/VMG integration for accurate metre-loss calculation
+- Helm overturn angle and dead-zone time tracked per manoeuvre
+- Built-in simulation mode for testing without live instruments
+- Persistent history across restarts (`tack-history.json` in SK data dir)
+- Live dashboard served at `http://<signalk-host>/plugins/signalk-tack-and-gybe/`
 
-- `index.js` — Main plugin engine (subscription handling, analysis, ORC fetch, persistence)
-- `package.json` — Dependencies
-- `README.md` — Documentation
-- `public/index.html` — Optional dashboard (visualizes live emitted Signal K paths)
-- `install.sh` — Optional installer script (automates the recommended install into Signal K user folder)
+## Install
 
-## Signal K paths the plugin subscribes to
+**From the Signal K AppStore / admin UI (recommended):**
+Search for `signalk-tack-and-gybe` and click Install.
 
-These paths must be provided by live instruments or your external sim plugin (numeric values):
-
-- `navigation.speedThroughWater` (m/s)
-- `environment.wind.angleTrueWater` (radians)
-- `environment.wind.angleApparent` (radians)
-- `steering.rudderAngle` (radians)
-- `environment.wind.speedTrue` (m/s)
-
-## Emitted Signal K delta paths
-
-- `performance.maneuver.state` — { state, stwKnots, twaDeg, vmgKnots, stale?, metersLostAccum }
-- `performance.maneuver.metersLost` — Number or object with metersLost
-- `performance.maneuver.liveStwKnots` — Number (knots)
-- `performance.maneuver.liveVmgKnots` — Number (knots)
-- `performance.maneuver.liveAwaDegrees` — Number (degrees)
-- `performance.maneuver.lastSummary` — Detailed summary object when a maneuver closes
-- `performance.maneuver.database` — Rolling averages and Top‑10 leaderboard
-
-## Web Dashboard (public/index.html)
-
-The plugin includes a small web dashboard in `public/index.html`. It visualizes live maneuver state, STW/VMG/ AWA graphs, the last maneuver analysis and a Top‑10 leaderboard.
-
-What it shows
-
-- Live status badge: Ready / InTurn / Recovery and live telemetry (STW, VMG, AWA, meters lost).
-- Timeline chart: recent STW, VMG and AWA history.
-- Last Maneuver Analysis card with meters lost, VMG gap, recovery time, min/max STW, overturn and dead‑zone time.
-- Fleet averages and Top‑10 leaderboard (fewest meters lost).
-
-How it connects
-
-- The dashboard opens a WebSocket to the Signal K stream endpoint: `/signalk/v1/stream` and subscribes to `performance.maneuver.*` updates.
-- By default it assumes the dashboard is served from the same host as the Signal K server (same origin). If you host the static file elsewhere, edit `public/index.html` and change the `wsUrl` variable to `ws://<SIGNALK_HOST>:3000/signalk/v1/stream?subscribe=none` (or `wss://` for TLS).
-
-Quick local test (one-liner)
-
-- Serve the `public` folder locally for a quick test (requires `npm`):
-
-  npx http-server public -p 8080
-
-  Then open http://localhost:8080 in your browser. If the dashboard shows no data, point `wsUrl` to your Signal K server address.
-
-## Precision & metric details
-
-- Integration is dt‑aware: distances and VMG are integrated using measured dt between analysis ticks.
-- Units:
-  - Inputs: `speedThroughWater` and `wind.speedTrue` are treated as m/s.
-  - Conversions for knots ↔ m/s are provided for display or configuration.
-- Meters lost:
-  - Accumulated by integrating instantaneous speed deficit (m/s) while boat is below the snapshot entry speed.
-  - Final `metersLost` uses `max(accumulated_deficit, theoreticalDistance - actualDistance)` to reduce sensitivity to short spikes.
-- VMG integration: actual and theoretical VMG distance accumulated with dt.
-- Overturn and dead‑zone:
-  - Tracks maximum overturn (deg) relative to entry TWA and time spent with |TWA| < 20°.
+**Or directly from GitHub (Pi install):**
+```bash
+cd ~/.signalk
+npm install https://github.com/theseal666/signal-k-tack-and-gybe.git
+# then restart Signal K
+```
 
 ## Configuration
 
-- `orcUrl` — optional URL to ORC/RMS JSON polar file
-- `targetSpeedKnots` — fallback / manual polar target (knots)
-- `recoveryThreshold` — percentage (0–100) of entry speed to consider maneuver recovered (default 95)
+| Option | Default | Description |
+|---|---|---|
+| `upwindTargetKnots` | 7.5 | Target STW upwind. Tack recovery ends when STW ≥ this × threshold. |
+| `downwindTargetKnots` | 9.0 | Target STW downwind. Gybe recovery ends when STW ≥ this × threshold. |
+| `recoveryThreshold` | 95 | % of target speed that counts as recovered. |
+| `simulate` | false | Play back a synthetic 46 s tack+gybe loop. Disable before sailing. |
 
-## Easy install (for sailors / non‑technical users)
+## Signal K paths subscribed (input)
 
-Follow the simple method below to install the plugin into your Signal K user folder. The installer will place the plugin in `~/.signalk/node_modules/signal-k-tack-and-gybe` and try to restart Signal K.
+| Path | Unit |
+|---|---|
+| `navigation.speedThroughWater` | m/s |
+| `environment.wind.angleTrueWater` | rad |
+| `environment.wind.angleApparent` | rad |
+| `steering.rudderAngle` | rad |
+| `environment.wind.speedTrue` | m/s |
 
-Prerequisites
+## Signal K paths emitted (output)
 
-- A running Signal K server (e.g., installed on a Raspberry Pi).
-- Node.js and npm installed on the same machine running Signal K (Node 16+ / 18+ recommended).
-- git and curl or wget available.
-- You must run the installer as the same user that runs Signal K (this ensures file ownership and permissions are correct). If you are unsure which user runs Signal K, check:
+| Path | Type | Description |
+|---|---|---|
+| `performance.maneuver.state` | object | Live telemetry at 5 Hz — state, STW, TWA, VMG, rudder angle, COG (sim), metres lost so far |
+| `performance.maneuver.lastSummary` | object | Full summary when a manoeuvre closes |
+| `performance.maneuver.database` | object | Persistent tack + gybe averages and leaderboards |
 
-  ps aux | grep signalk-server | grep -v grep
+### `performance.maneuver.state` object
 
-  or inspect the Signal K data directory owner:
+```json
+{
+  "state": "Recovery",
+  "stwKnots": 6.12,
+  "twaDeg": 41.2,
+  "awaDeg": 34.8,
+  "rudderDeg": -12.5,
+  "cogDeg": 221.2,
+  "tack": "port",
+  "vmgKnots": 4.61,
+  "metersLostAccum": 18.4
+}
+```
 
-  ls -ld ~/.signalk
+`cogDeg` is only populated in simulation mode (derived from TWA assuming wind from south). In real mode the dashboard reads `navigation.courseOverGroundTrue` directly from the SK stream (e.g., from a RaceBox IMU).
 
-If Signal K runs as user `node` (common on Pi images), switch to that user or run the installer as that user using `sudo -u node -s`.
+### `performance.maneuver.lastSummary` object
 
-Single-line installer (recommended)
+```json
+{
+  "type": "Tack",
+  "timestamp": "2026-07-11T07:14:33.000Z",
+  "metersLost": 14.2,
+  "recoveryDurationSec": 11.4,
+  "minStwKnots": 2.84,
+  "maxStwKnots": 7.51,
+  "maxOverturnTWA": 3.1,
+  "timeInDeadZoneSec": 1.24,
+  "actualDistanceMeters": 41.2,
+  "theoreticalDistanceMeters": 55.4,
+  "actualVmgDistanceMeters": 30.1,
+  "theoreticalVmgDistanceMeters": 38.8
+}
+```
 
-Interactive (prompts before running):
+### `performance.maneuver.database` object
 
-curl -fsSL https://raw.githubusercontent.com/theseal666/signal-k-tack-and-gybe/main/install.sh | bash
+```json
+{
+  "tacks": {
+    "count": 12,
+    "averages": { "metersLost": 16.3, "recoveryDurationSec": 10.8, "minStwKnots": 2.91 },
+    "topTen": [ ... ]
+  },
+  "gybes": {
+    "count": 7,
+    "averages": { "metersLost": 22.1, "recoveryDurationSec": 13.2, "minStwKnots": 1.87 },
+    "topTen": [ ... ]
+  }
+}
+```
 
-Non-interactive (auto yes):
+## Dashboard
 
-curl -fsSL https://raw.githubusercontent.com/theseal666/signal-k-tack-and-gybe/main/install.sh | bash -s -- --yes
+The plugin serves a live dashboard at:
 
-If `curl` is not available, use `wget`:
+```
+http://<signalk-host>/plugins/signalk-tack-and-gybe/
+```
 
-wget -qO- https://raw.githubusercontent.com/theseal666/signal-k-tack-and-gybe/main/install.sh | bash
+**Left panel** — vessel orientation (AWA compass), live telemetry (STW, VMG, TWA, rudder, metres lost)
 
-What the installer does
+**Centre panel** — timeline chart: STW, VMG, TWA, rudder angle, COG — with a highlight box around each manoeuvre
 
-- Clones the repository to a temporary folder.
-- Runs `npm install --production` inside the plugin folder to install required dependencies (including `axios`).
-- Copies the plugin into `~/.signalk/node_modules/signal-k-tack-and-gybe`.
-- Attempts to restart Signal K (best-effort via `systemctl`).
+**Right panel** — last manoeuvre analysis card; separate Tack and Gybe stat panels (count, avg metres lost, avg recovery time, avg min speed); separate Top-10 leaderboards for tacks and gybes
 
-Permissions notes
+## Detection logic
 
-- Run the installer as the Signal K user so files are owned correctly. If you run it as root or another user, you may need to fix ownership, for example:
+### Tack
 
-  sudo chown -R <signalk-user> ~/.signalk/node_modules/signal-k-tack-and-gybe
+| Phase | Trigger |
+|---|---|
+| Pending | `\|TWA\| < 40°` AND rudder > 5° |
+| InTurn | TWA sign-changes AND `\|TWA\| < 20°` at crossing |
+| Recovery | `\|TWA\| > 15°` AND `< 90°` after 500 ms gate |
+| Done | STW ≥ `upwindTargetKnots × threshold` |
 
-Replace `<signalk-user>` with the account the Signal K process runs under.
+### Gybe
 
-## Updating the plugin from Git
+| Phase | Trigger |
+|---|---|
+| Pending | `\|TWA\| > 110°` AND rudder > 5° |
+| InTurn | TWA sign-changes AND `\|TWA\| > 150°` at crossing |
+| Recovery | `\|TWA\| < 170°` after 500 ms gate |
+| Done | STW ≥ `downwindTargetKnots × threshold` |
 
-If you installed the plugin using the installer above, the easiest update is to re-run the installer (it will pull the latest files and reinstall dependencies). To update manually via git, only use the steps below if your plugin directory is a git checkout (you cloned it there):
+The TWA sign-change at ±180° (gybe through dead run) is handled by the `normalizeRadians()` helper that maps TWA to (−π, π] — a sweep from +179° to −179° registers as a sign change naturally.
 
-1. Stop Signal K (optional but recommended):
+## Simulation mode
 
-   sudo systemctl stop signalk
+Enable `simulate: true` in the plugin settings to play back a synthetic 46-second cycle:
 
-2. Pull latest changes and reinstall deps:
+```
+upwind-steady (4 s) →
+tack-entry (0.5 s) → tack-turn (2.5 s) → tack-recovery (9 s) →
+bear-away (2 s) → downwind-steady (5 s) →
+gybe-entry (0.5 s) → gybe-turn (2.5 s) → gybe-recovery (9 s) →
+head-up (2 s) → repeat
+```
 
-   cd ~/.signalk/node_modules/signal-k-tack-and-gybe
-   git fetch origin
-   git reset --hard origin/main
-   npm install --production
+Useful for validating the dashboard and tuning thresholds without going sailing.
 
-3. Start Signal K again:
+## Updating
 
-   sudo systemctl start signalk
+Re-install from the AppStore/admin UI, or from the Pi command line:
 
-Alternative quick update (re-run installer):
+```bash
+cd ~/.signalk
+npm install https://github.com/theseal666/signal-k-tack-and-gybe.git
+sudo systemctl restart signalk
+```
 
-curl -fsSL https://raw.githubusercontent.com/theseal666/signal-k-tack-and-gybe/main/install.sh | bash -s -- --yes
+## Roadmap
 
-## Quick checks after install
-
-- Verify plugin folder exists:
-
-  ls ~/.signalk/node_modules/signal-k-tack-and-gybe
-
-- Verify dependencies were installed (inside plugin folder):
-
-  cd ~/.signalk/node_modules/signal-k-tack-and-gybe
-  ls node_modules | grep axios
-
-- Check for `tack-history.json` in Signal K data dir (created after first logged maneuver):
-
-  ls $(node -e "console.log(require('os').homedir() + '/.signalk')")/tack-history.json || echo "no history yet"
-
-- Watch Signal K logs for errors while starting the plugin:
-
-  sudo journalctl -u signalk -f    # follow logs on systemd systems
-
-## Troubleshooting
-
-- If Signal K fails to load the plugin with `MODULE_NOT_FOUND` and the path references `signal-k-tack-and-gybe`, check the folder name under `~/.signalk/node_modules/` — it must be exactly `signal-k-tack-and-gybe` (lowercase).
-- If ORC polar JSON parsing fails with an "Unexpected token" at the start, the remote JSON likely contains a UTF‑8 BOM; I can update the plugin to trim it automatically or you can remove the BOM from the source file.
-
----
-
-If you want screenshots, a compact mobile UI, or a small harness to replay example delta payloads for demo/testing, tell me and I'll add them.
+- [ ] Publish to npm / Signal K AppStore
+- [ ] `GET /history` HTTP endpoint for loading history on dashboard open
+- [ ] ORC polar integration (optional override for target speeds, native fetch)
+- [ ] Session segmentation by `navigation.logTrip`
