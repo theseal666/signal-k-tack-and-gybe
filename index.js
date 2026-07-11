@@ -4,7 +4,7 @@ const path = require('path');
 module.exports = function (app) {
   const plugin = {};
   let unsubscribes = [];
-  let simInterval = null;
+  let analysisInterval = null;
   let historyFilePath = '';
 
   plugin.id = 'signalk-tack-and-gybe';
@@ -17,6 +17,7 @@ module.exports = function (app) {
   let currentState = 'Straight';
   let maneuverType = 'Straight';
   let startTime = 0;
+  let inTurnStartTime = 0; // gate to prevent instant InTurn→Recovery at sign-crossing
   let pendingStartTime = 0;
 
   let snapshotEntrySTW = 0; // knots
@@ -52,6 +53,7 @@ module.exports = function (app) {
 
   const knotsToMS = k => Number(k) * 0.514444;
   const msToKnots = m => Number(m) * 1.943844492;
+  const lerp = (a, b, t) => a + (b - a) * t;
 
   function safeNumber(v) {
     const n = Number(v);
@@ -122,19 +124,121 @@ module.exports = function (app) {
     );
   }
 
-  function startAnalysisLoop() {
-    if (simInterval) clearInterval(simInterval);
-    lastAnalysisTime = Date.now();
-    simInterval = setInterval(() => {
-      try { runAnalysis(); } catch (e) { app.error('Analysis loop error: ' + e.message); }
-    }, 200);
+  // ── Simulation ─────────────────────────────────────────────────────────────
+  // When cfg.simulate is true, this replaces the SK subscription.
+  // Phases drive the same currentXxx variables that runAnalysis() reads.
+  //
+  // Full cycle (~46s):
+  //   upwind-steady (4s) → tack-entry (0.5s) → tack-turn (2.5s) →
+  //   tack-recovery (9s) → bear-away (2s) → downwind-steady (5s) →
+  //   gybe-entry (0.5s) → gybe-turn (2.5s) → gybe-recovery (9s) →
+  //   head-up (2s) → loop
+  let simPhase = 'upwind-steady';
+  let simPhaseStart = 0;
+
+  function stepSimulation(now) {
+    const ms = now - simPhaseStart;
+    function next(p) { simPhase = p; simPhaseStart = now; }
+
+    switch (simPhase) {
+      case 'upwind-steady':
+        // Starboard tack close-hauled: TWA ≈ −38° (port side)
+        currentSTW = 3.86; currentTWA = -0.663; currentAWA = -0.576; currentRudder = 0;
+        if (ms > 4000) next('tack-entry');
+        break;
+
+      case 'tack-entry':
+        // Helm goes hard over
+        currentRudder = -0.349;
+        if (ms > 500) next('tack-turn');
+        break;
+
+      case 'tack-turn': {
+        // TWA sweeps −38° → +38° through irons; speed drops to ≈2.5 kn
+        const t = Math.min(1, ms / 2500);
+        currentTWA = lerp(-0.663, 0.663, t);
+        currentAWA = lerp(-0.576, 0.576, t);
+        currentSTW = lerp(3.86, 1.29, t);
+        currentRudder = -0.349;
+        if (ms > 2500) next('tack-recovery');
+        break;
+      }
+
+      case 'tack-recovery': {
+        // Boat settled on new tack, rebuilding speed to 7.5 kn
+        const t = Math.min(1, ms / 9000);
+        currentSTW = lerp(1.29, 3.86, t);
+        currentTWA = 0.663; currentAWA = 0.576; currentRudder = 0;
+        if (ms > 9000) next('bear-away');
+        break;
+      }
+
+      case 'bear-away': {
+        // Head down from close-hauled to running (TWA +38° → +150°)
+        const t = Math.min(1, ms / 2000);
+        currentTWA = lerp(0.663, 2.618, t);
+        currentAWA = lerp(0.576, 2.531, t);
+        currentSTW = lerp(3.86, 4.63, t);
+        currentRudder = 0;
+        if (ms > 2000) next('downwind-steady');
+        break;
+      }
+
+      case 'downwind-steady':
+        // Port gybe run: TWA ≈ +150°
+        currentSTW = 4.63; currentTWA = 2.618; currentAWA = 2.531; currentRudder = 0;
+        if (ms > 5000) next('gybe-entry');
+        break;
+
+      case 'gybe-entry':
+        // Helm over for gybe
+        currentRudder = 0.349;
+        if (ms > 500) next('gybe-turn');
+        break;
+
+      case 'gybe-turn': {
+        // TWA sweeps +150° → +210° (wraps to −150° at the dead run crossing)
+        const t = Math.min(1, ms / 2500);
+        const twaDeg = lerp(150, 210, t);
+        currentTWA = normalizeRadians(twaDeg * Math.PI / 180); // handles ±180° wrap
+        currentAWA = normalizeRadians(twaDeg * 0.966 * Math.PI / 180);
+        currentSTW = lerp(4.63, 1.54, t);
+        currentRudder = 0.349;
+        if (ms > 2500) next('gybe-recovery');
+        break;
+      }
+
+      case 'gybe-recovery': {
+        // Settled on new gybe, rebuilding to 9 kn
+        const t = Math.min(1, ms / 9000);
+        currentSTW = lerp(1.54, 4.63, t);
+        currentTWA = -2.618; currentAWA = -2.531; currentRudder = 0;
+        if (ms > 9000) next('head-up');
+        break;
+      }
+
+      case 'head-up': {
+        // Head up from run back to close-hauled on starboard tack
+        const t = Math.min(1, ms / 2000);
+        currentTWA = lerp(-2.618, -0.663, t);
+        currentAWA = lerp(-2.531, -0.576, t);
+        currentSTW = lerp(4.63, 3.86, t);
+        currentRudder = 0;
+        if (ms > 2000) next('upwind-steady');
+        break;
+      }
+    }
+    lastDataTimestamp = now;
   }
 
+  // ── Analysis pipeline ───────────────────────────────────────────────────────
   function runAnalysis() {
     const now = Date.now();
     let dt = (now - lastAnalysisTime) / 1000.0;
     if (!Number.isFinite(dt) || dt <= 0) dt = 0.2;
     lastAnalysisTime = now;
+
+    if (cfg.simulate) stepSimulation(now);
 
     const stwKnots = msToKnots(currentSTW);
     const twaDeg = currentTWA * 180.0 / Math.PI;
@@ -196,17 +300,17 @@ module.exports = function (app) {
       const signChange = (prev.twa < 0 && twaDeg > 0) || (prev.twa > 0 && twaDeg < 0);
 
       if (signChange && Math.abs(twaDeg) < 20) {
-        // TWA crossed zero through irons → Tack
         currentState = 'InTurn';
         maneuverType = 'Tack';
         startTime = now;
+        inTurnStartTime = now;
         minSTW = stwKnots; maxSTW = stwKnots;
         minVMG = vmgKnots; maxVMG = vmgKnots;
       } else if (signChange && Math.abs(twaDeg) > 150) {
-        // TWA crossed ±180° through dead run → Gybe
         currentState = 'InTurn';
         maneuverType = 'Gybe';
         startTime = now;
+        inTurnStartTime = now;
         minSTW = stwKnots; maxSTW = stwKnots;
         minVMG = vmgKnots; maxVMG = vmgKnots;
       } else if (timeInPending > 10.0) {
@@ -235,10 +339,18 @@ module.exports = function (app) {
       const speedDeficitMS = Math.max(0, knotsToMS(snapshotEntrySTW) - currentSTW);
       metersLostAccum += speedDeficitMS * dt;
 
-      // InTurn → Recovery: boat has passed through the manoeuvre apex
-      if (currentState === 'InTurn') {
-        if (maneuverType === 'Tack' && Math.abs(twaDeg) < 10) currentState = 'Recovery';
-        if (maneuverType === 'Gybe' && Math.abs(twaDeg) > 120) currentState = 'Recovery';
+      // InTurn → Recovery: boat has passed the apex and sails are filling.
+      // Gate of 500 ms prevents a false transition at the exact sign-crossing tick
+      // (where |TWA| would satisfy the condition immediately).
+      if (currentState === 'InTurn' && (now - inTurnStartTime) > 500) {
+        if (maneuverType === 'Tack' && Math.abs(twaDeg) > 15 && Math.abs(twaDeg) < 90) {
+          // Sails filling on the new close-hauled course (past through-irons zone)
+          currentState = 'Recovery';
+        }
+        if (maneuverType === 'Gybe' && Math.abs(twaDeg) < 170) {
+          // Sails filling on the new gybe heading (past the dead-run zone)
+          currentState = 'Recovery';
+        }
       }
 
       // Recovery → Straight: boat is back up to target speed
@@ -281,6 +393,7 @@ module.exports = function (app) {
     });
   }
 
+  // ── Plugin lifecycle ────────────────────────────────────────────────────────
   plugin.start = function (startOptions) {
     const options = startOptions || {};
     const configDir = (app.getDataDirPath && app.getDataDirPath()) || '.';
@@ -291,67 +404,76 @@ module.exports = function (app) {
       upwindTargetKnots: options.upwindTargetKnots || 7.5,
       downwindTargetKnots: options.downwindTargetKnots || 9.0,
       recoveryMultiplier: (options.recoveryThreshold || 95) / 100,
+      simulate: options.simulate === true,
     };
 
-    app.setPluginStatus('Running — waiting for manoeuvres');
-
-    const localSub = {
-      context: 'vessels.self',
-      subscribe: [
-        { path: 'navigation.speedThroughWater', period: 100 },
-        { path: 'environment.wind.angleTrueWater', period: 100 },
-        { path: 'environment.wind.angleApparent', period: 100 },
-        { path: 'steering.rudderAngle', period: 100 },
-        { path: 'environment.wind.speedTrue', period: 500 }
-      ]
-    };
-
-    try {
-      app.subscriptionmanager.subscribe(
-        localSub,
-        unsubscribes,
-        err => app.error('Instrumentation binding error: ' + err),
-        delta => {
-          if (!delta || !delta.updates) return;
-          delta.updates.forEach(update => {
-            if (!update.values) return;
-            update.values.forEach(kv => {
-              const v = safeNumber(kv.value);
-              if (v === null) return;
-              switch (kv.path) {
-                case 'navigation.speedThroughWater':
-                  currentSTW = v; lastDataTimestamp = Date.now(); break;
-                case 'environment.wind.angleTrueWater': {
-                  const n = normalizeRadians(v);
-                  if (n !== null) { currentTWA = n; lastDataTimestamp = Date.now(); }
-                  break;
+    if (cfg.simulate) {
+      simPhase = 'upwind-steady';
+      simPhaseStart = Date.now();
+      app.setPluginStatus('SIMULATION mode — watch the dashboard for tacks and gybes');
+    } else {
+      app.setPluginStatus('Running — waiting for manoeuvres');
+      const localSub = {
+        context: 'vessels.self',
+        subscribe: [
+          { path: 'navigation.speedThroughWater', period: 100 },
+          { path: 'environment.wind.angleTrueWater', period: 100 },
+          { path: 'environment.wind.angleApparent', period: 100 },
+          { path: 'steering.rudderAngle', period: 100 },
+          { path: 'environment.wind.speedTrue', period: 500 }
+        ]
+      };
+      try {
+        app.subscriptionmanager.subscribe(
+          localSub,
+          unsubscribes,
+          err => app.error('Instrumentation binding error: ' + err),
+          delta => {
+            if (!delta || !delta.updates) return;
+            delta.updates.forEach(update => {
+              if (!update.values) return;
+              update.values.forEach(kv => {
+                const v = safeNumber(kv.value);
+                if (v === null) return;
+                switch (kv.path) {
+                  case 'navigation.speedThroughWater':
+                    currentSTW = v; lastDataTimestamp = Date.now(); break;
+                  case 'environment.wind.angleTrueWater': {
+                    const n = normalizeRadians(v);
+                    if (n !== null) { currentTWA = n; lastDataTimestamp = Date.now(); }
+                    break;
+                  }
+                  case 'environment.wind.angleApparent': {
+                    const n = normalizeRadians(v);
+                    if (n !== null) { currentAWA = n; lastDataTimestamp = Date.now(); }
+                    break;
+                  }
+                  case 'steering.rudderAngle':
+                    currentRudder = v; lastDataTimestamp = Date.now(); break;
+                  case 'environment.wind.speedTrue':
+                    currentTWS = v; lastDataTimestamp = Date.now(); break;
                 }
-                case 'environment.wind.angleApparent': {
-                  const n = normalizeRadians(v);
-                  if (n !== null) { currentAWA = n; lastDataTimestamp = Date.now(); }
-                  break;
-                }
-                case 'steering.rudderAngle':
-                  currentRudder = v; lastDataTimestamp = Date.now(); break;
-                case 'environment.wind.speedTrue':
-                  currentTWS = v; lastDataTimestamp = Date.now(); break;
-              }
+              });
             });
-          });
-        }
-      );
-    } catch (e) {
-      app.error('Failed to subscribe to instrument feeds: ' + e.message);
+          }
+        );
+      } catch (e) {
+        app.error('Failed to subscribe to instrument feeds: ' + e.message);
+      }
     }
 
-    startAnalysisLoop();
+    if (analysisInterval) clearInterval(analysisInterval);
+    lastAnalysisTime = Date.now();
+    analysisInterval = setInterval(() => {
+      try { runAnalysis(); } catch (e) { app.error('Analysis loop error: ' + e.message); }
+    }, 200);
   };
 
   plugin.stop = function () {
     try {
       unsubscribes.forEach(u => { try { u(); } catch (e) {} });
       unsubscribes = [];
-      if (simInterval) { clearInterval(simInterval); simInterval = null; }
+      if (analysisInterval) { clearInterval(analysisInterval); analysisInterval = null; }
       saveHistoryDatabase();
       app.setPluginStatus('Stopped');
     } catch (e) {
@@ -379,6 +501,12 @@ module.exports = function (app) {
         title: 'Recovery threshold (%)',
         description: 'Percentage of target speed at which the manoeuvre is considered recovered (default 95 = 95% of target).',
         default: 95
+      },
+      simulate: {
+        type: 'boolean',
+        title: 'Simulation mode',
+        description: 'Play back a synthetic tack + gybe sequence (~46 s loop) for testing the dashboard without real instruments. Disable before sailing.',
+        default: false
       }
     }
   };
