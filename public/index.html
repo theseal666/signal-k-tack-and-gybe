@@ -24,8 +24,9 @@
     .metric-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #2d2d34; font-size: 0.9rem; }
     .metric-value { font-weight: bold; color: #38bdf8; }
     .status-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-weight: bold; text-align: center; width: 100px; }
-    .state-Ready { background: #1e293b; color: #94a3b8; }
-    .state-InTurn { background: #b45309; color: #fef08a; }
+    .state-Straight { background: #1e293b; color: #94a3b8; }
+    .state-Pending  { background: #3b2800; color: #fcd34d; }
+    .state-InTurn   { background: #b45309; color: #fef08a; }
     .state-Recovery { background: #1e3a8a; color: #93c5fd; }
     
     /* Stats Layout definitions */
@@ -104,10 +105,11 @@
   <script>
     const maxDataPoints = 120;
     const labels = Array(maxDataPoints).fill(0).map((_, i) => i);
-    const stwData = Array(maxDataPoints).fill(0);
-    const vmgData = Array(maxDataPoints).fill(0);
-    const awaData = Array(maxDataPoints).fill(0);
-    const rudderData = Array(maxDataPoints).fill(0);
+    const stwData    = Array(maxDataPoints).fill(null);
+    const vmgData    = Array(maxDataPoints).fill(null);
+    const awaData    = Array(maxDataPoints).fill(null);
+    const rudderData = Array(maxDataPoints).fill(null);
+    const cogData    = Array(maxDataPoints).fill(null);
 
     let tackStartIndex = null; let recoveryEndIndex = null;
 
@@ -141,10 +143,10 @@
         const chartOptions = {
           responsive: true, maintainAspectRatio: false,
           scales: {
-            y: { type: 'linear', display: true, position: 'left', grid: { color: '#2d2d34' } },
-            yAwa: { type: 'linear', display: true, position: 'right', min: -180, max: 180, grid: { drawOnChartArea: false } },
-            yRudder: { type: 'linear', display: true, position: 'right', min: -45, max: 45, grid: { drawOnChartArea: false }, ticks: { stepSize: 5 } },
-            x: { display: false }
+            y:       { type: 'linear', display: true, position: 'left',  min: -2, max: 12, grid: { color: '#2d2d34' }, title: { display: true, text: 'kn', color: '#64748b' } },
+            yAwa:    { type: 'linear', display: true, position: 'right', min: -180, max: 180, grid: { drawOnChartArea: false }, title: { display: true, text: '° TWA/Rudder', color: '#64748b' } },
+            yCog:    { type: 'linear', display: true, position: 'right', min: 0, max: 360, grid: { drawOnChartArea: false }, title: { display: true, text: '° COG', color: '#64748b' }, ticks: { stepSize: 90 } },
+            x:       { display: false }
           },
           plugins: {
             legend: { labels: { color: '#e2e8f0' } },
@@ -168,10 +170,11 @@
           data: {
             labels: labels,
             datasets: [
-              { label: 'STW (kn)', data: stwData, borderColor: '#38bdf8', borderWidth: 2, pointRadius: 0, fill: false, yAxisID: 'y' },
-              { label: 'VMG (kn)', data: vmgData, borderColor: '#34d399', borderWidth: 2, pointRadius: 0, fill: false, yAxisID: 'y' },
-              { label: 'AWA (deg)', data: awaData, borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa' },
-              { label: 'Rudder (deg)', data: rudderData, borderColor: '#f472b6', borderWidth: 1.5, pointRadius: 0, fill: false, borderDash: [4,2], yAxisID: 'yRudder' }
+              { label: 'STW (kn)',    data: stwData,    borderColor: '#38bdf8', borderWidth: 2,   pointRadius: 0, fill: false, yAxisID: 'y',    spanGaps: true },
+              { label: 'VMG (kn)',    data: vmgData,    borderColor: '#34d399', borderWidth: 2,   pointRadius: 0, fill: false, yAxisID: 'y',    spanGaps: true },
+              { label: 'TWA (°)',     data: awaData,    borderColor: '#fbbf24', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa', spanGaps: true },
+              { label: 'Rudder (°)', data: rudderData, borderColor: '#f472b6', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yAwa', borderDash: [4,2], spanGaps: true },
+              { label: 'COG (°)',     data: cogData,    borderColor: '#a78bfa', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yCog', spanGaps: true }
             ]
           },
           options: chartOptions
@@ -229,7 +232,8 @@
           { path: "performance.maneuver", period: 100 },
           { path: "performance.maneuver.*", period: 100 },
           { path: "steering.rudderAngle", period: 100 },
-          { path: "environment.wind.angleApparent", period: 200 }
+          { path: "environment.wind.angleApparent", period: 200 },
+          { path: "navigation.courseOverGroundTrue", period: 500 }
         ]
       }));
     };
@@ -275,11 +279,14 @@
               }
 
               if (p === 'environment.wind.angleApparent') {
-                const awaDeg = (typeof v === 'number') ? (Math.abs(v * 180 / Math.PI)) : null;
-                if (awaDeg !== null) {
-                  document.getElementById('valAWA').innerText = awaDeg.toFixed(1) + '°';
-                  awaData.push(awaDeg); awaData.shift(); drawVessel(awaDeg);
-                }
+                const deg = (typeof v === 'number') ? (v * 180 / Math.PI) : null;
+                if (deg !== null) drawVessel(deg);
+                return;
+              }
+
+              if (p === 'navigation.courseOverGroundTrue') {
+                const deg = (typeof v === 'number') ? ((v * 180 / Math.PI + 360) % 360) : null;
+                if (deg !== null) { cogData.push(deg); cogData.shift(); }
                 return;
               }
 
@@ -318,14 +325,15 @@
         if (v && typeof v === 'object') {
           if (typeof v.stwKnots === 'number') { document.getElementById('valSTW').innerText = v.stwKnots.toFixed(2) + ' kn'; stwData.push(v.stwKnots); stwData.shift(); }
           if (typeof v.vmgKnots === 'number') { document.getElementById('valVMG').innerText = v.vmgKnots.toFixed(2) + ' kn'; vmgData.push(v.vmgKnots); vmgData.shift(); }
-          if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(Math.abs(v.twaDeg)); awaData.shift(); drawVessel(v.twaDeg); }
+          if (typeof v.twaDeg === 'number') { document.getElementById('valAWA').innerText = v.twaDeg.toFixed(1) + '°'; awaData.push(v.twaDeg); awaData.shift(); drawVessel(v.twaDeg); }
           if (typeof v.metersLostAccum === 'number') document.getElementById('valLost').innerText = v.metersLostAccum.toFixed(1) + ' m';
-          // support optional embedded rudder in state
           if (typeof v.rudderDeg === 'number') { document.getElementById('valRudder').innerText = v.rudderDeg.toFixed(1) + '°'; rudderData.push(v.rudderDeg); rudderData.shift(); }
+          if (typeof v.cogDeg === 'number') { cogData.push(v.cogDeg); cogData.shift(); }
         }
 
-        if (lastState === 'Ready' && stateVal === 'InTurn') { tackStartIndex = maxDataPoints - 1; recoveryEndIndex = null; }
-        if (lastState === 'Recovery' && stateVal === 'Ready') { recoveryEndIndex = maxDataPoints - 1; }
+        // States: Straight (idle), Pending (rudder input detected), InTurn, Recovery
+        if ((lastState === 'Straight' || lastState === 'Pending') && stateVal === 'InTurn') { tackStartIndex = maxDataPoints - 1; recoveryEndIndex = null; }
+        if (lastState === 'Recovery' && stateVal === 'Straight') { recoveryEndIndex = maxDataPoints - 1; }
         lastState = stateVal;
       }
 
@@ -376,7 +384,7 @@
     drawVessel(-40);
 
     // Expose for debugging in console
-    window._tackDashboard = { ws, chart, stwData, vmgData, awaData, rudderData };
+    window._tackDashboard = { ws, chart, stwData, vmgData, awaData, rudderData, cogData };
   </script>
 </body>
 </html>

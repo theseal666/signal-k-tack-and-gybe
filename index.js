@@ -279,7 +279,8 @@ module.exports = function (app) {
       if (Math.abs(rudderDeg) > 5 && (isUpwind || isDownwind)) {
         currentState = 'Pending';
         pendingStartTime = now;
-        const base = rollingHistory[0] || { stw: stwKnots, vmg: vmgKnots, twa: twaDeg };
+        // Most recent entry = true pre-manoeuvre state. [0] (oldest) could be from a previous leg.
+        const base = rollingHistory[rollingHistory.length - 1] || { stw: stwKnots, vmg: vmgKnots, twa: twaDeg };
         snapshotEntrySTW = base.stw;
         snapshotEntryVMG = base.vmg;
         snapshotEntryTWA = Math.abs(base.twa);
@@ -382,11 +383,23 @@ module.exports = function (app) {
       }
     }
 
+    // COG: in sim assume wind FROM 180° (south), so COG = (TWA_deg + 360) % 360.
+    // In real mode, COG comes from instruments via navigation.courseOverGroundTrue.
+    const cogDeg = cfg.simulate
+      ? ((twaDeg + 360) % 360)
+      : null;
+
+    if (cfg.simulate && cogDeg !== null) {
+      emitDelta('navigation.courseOverGroundTrue', (cogDeg * Math.PI) / 180);
+    }
+
     emitDelta('performance.maneuver.state', {
       state: currentState,
       stwKnots: Number(stwKnots.toFixed(3)),
       twaDeg: Number(twaDeg.toFixed(2)),
       awaDeg: Number(awaDeg.toFixed(2)),
+      rudderDeg: Number(rudderDeg.toFixed(1)),
+      cogDeg: cogDeg !== null ? Number(cogDeg.toFixed(1)) : null,
       tack,
       vmgKnots: Number(vmgKnots.toFixed(3)),
       metersLostAccum: Number(metersLostAccum.toFixed(2))
@@ -420,7 +433,8 @@ module.exports = function (app) {
           { path: 'environment.wind.angleTrueWater', period: 100 },
           { path: 'environment.wind.angleApparent', period: 100 },
           { path: 'steering.rudderAngle', period: 100 },
-          { path: 'environment.wind.speedTrue', period: 500 }
+          { path: 'environment.wind.speedTrue', period: 500 },
+        { path: 'navigation.courseOverGroundTrue', period: 500 }
         ]
       };
       try {
@@ -451,7 +465,8 @@ module.exports = function (app) {
                   case 'steering.rudderAngle':
                     currentRudder = v; lastDataTimestamp = Date.now(); break;
                   case 'environment.wind.speedTrue':
-                    currentTWS = v; lastDataTimestamp = Date.now(); break;
+                  currentTWS = v; lastDataTimestamp = Date.now(); break;
+                // COG is read by the dashboard directly via its own WS subscription
                 }
               });
             });
