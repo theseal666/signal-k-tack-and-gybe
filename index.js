@@ -45,11 +45,13 @@ module.exports = function (app) {
   let lastAnalysisTime = Date.now();
   let lastDataTimestamp = 0;
 
-  let performanceDatabase = {
-    totalTacksLogged: 0,
-    averages: { metersLost: 0, recoveryDurationSec: 0, minStwKnots: 0 },
-    topTenBests: []
-  };
+  function defaultDatabase() {
+    return {
+      tacks: { count: 0, averages: { metersLost: 0, recoveryDurationSec: 0, minStwKnots: 0 }, topTen: [] },
+      gybes: { count: 0, averages: { metersLost: 0, recoveryDurationSec: 0, minStwKnots: 0 }, topTen: [] }
+    };
+  }
+  let performanceDatabase = defaultDatabase();
 
   const knotsToMS = k => Number(k) * 0.514444;
   const msToKnots = m => Number(m) * 1.943844492;
@@ -71,7 +73,13 @@ module.exports = function (app) {
   function loadHistoryDatabase() {
     try {
       if (historyFilePath && fs.existsSync(historyFilePath)) {
-        performanceDatabase = JSON.parse(fs.readFileSync(historyFilePath, 'utf8'));
+        const loaded = JSON.parse(fs.readFileSync(historyFilePath, 'utf8'));
+        // Migrate old format (had totalTacksLogged/topTenBests) — can't split, start fresh
+        if (loaded && loaded.tacks && loaded.gybes) {
+          performanceDatabase = loaded;
+        } else {
+          app.debug('Old database format detected — starting fresh with split tack/gybe schema');
+        }
       }
     } catch (e) {
       app.error('Failed to parse history database: ' + e.message);
@@ -97,30 +105,31 @@ module.exports = function (app) {
 
   function logManeuver(summary) {
     const db = performanceDatabase;
-    db.totalTacksLogged++;
-    const n = db.totalTacksLogged;
+    const cat = summary.type === 'Gybe' ? db.gybes : db.tacks;
+    cat.count++;
+    const n = cat.count;
     if (n === 1) {
-      db.averages = {
+      cat.averages = {
         metersLost: summary.metersLost,
         recoveryDurationSec: summary.recoveryDurationSec,
         minStwKnots: summary.minStwKnots
       };
     } else {
-      db.averages.metersLost =
-        Number(((db.averages.metersLost * (n - 1) + summary.metersLost) / n).toFixed(1));
-      db.averages.recoveryDurationSec =
-        Number(((db.averages.recoveryDurationSec * (n - 1) + summary.recoveryDurationSec) / n).toFixed(1));
-      db.averages.minStwKnots =
-        Number(((db.averages.minStwKnots * (n - 1) + summary.minStwKnots) / n).toFixed(2));
+      cat.averages.metersLost =
+        Number(((cat.averages.metersLost * (n - 1) + summary.metersLost) / n).toFixed(1));
+      cat.averages.recoveryDurationSec =
+        Number(((cat.averages.recoveryDurationSec * (n - 1) + summary.recoveryDurationSec) / n).toFixed(1));
+      cat.averages.minStwKnots =
+        Number(((cat.averages.minStwKnots * (n - 1) + summary.minStwKnots) / n).toFixed(2));
     }
-    db.topTenBests.push(summary);
-    db.topTenBests.sort((a, b) => a.metersLost - b.metersLost);
-    if (db.topTenBests.length > 10) db.topTenBests.pop();
+    cat.topTen.push(summary);
+    cat.topTen.sort((a, b) => a.metersLost - b.metersLost);
+    if (cat.topTen.length > 10) cat.topTen.pop();
     saveHistoryDatabase();
     emitDelta('performance.maneuver.lastSummary', summary);
     emitDelta('performance.maneuver.database', db);
     app.setPluginStatus(
-      `${db.totalTacksLogged} manoeuvres — last: ${summary.type} ${summary.metersLost} m lost, ${summary.recoveryDurationSec} s`
+      `${db.tacks.count} tacks, ${db.gybes.count} gybes — last: ${summary.type} ${summary.metersLost} m lost, ${summary.recoveryDurationSec} s`
     );
   }
 
@@ -389,10 +398,6 @@ module.exports = function (app) {
       ? ((twaDeg + 360) % 360)
       : null;
 
-    if (cfg.simulate && cogDeg !== null) {
-      emitDelta('navigation.courseOverGroundTrue', (cogDeg * Math.PI) / 180);
-    }
-
     emitDelta('performance.maneuver.state', {
       state: currentState,
       stwKnots: Number(stwKnots.toFixed(3)),
@@ -433,8 +438,7 @@ module.exports = function (app) {
           { path: 'environment.wind.angleTrueWater', period: 100 },
           { path: 'environment.wind.angleApparent', period: 100 },
           { path: 'steering.rudderAngle', period: 100 },
-          { path: 'environment.wind.speedTrue', period: 500 },
-        { path: 'navigation.courseOverGroundTrue', period: 500 }
+          { path: 'environment.wind.speedTrue', period: 500 }
         ]
       };
       try {

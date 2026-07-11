@@ -45,7 +45,7 @@
   <div style="max-width:1650px; margin: 0 auto 15px auto; display:flex; justify-content:space-between; align-items:center;">
     <h1 style="margin:0; font-size:1.6rem;">MAT 12.20 Tactical Performance Logger</h1>
     <div style="display:flex; align-items:center; gap:12px;">
-      <div id="maneuverState" class="status-badge state-Ready">Ready</div>
+      <div id="maneuverState" class="status-badge state-Straight">Straight</div>
       <div id="wsStatus" class="ws-status disconnected">WS: disconnected</div>
     </div>
   </div>
@@ -84,19 +84,37 @@
         <div class="metric-row"><span>Sail Dead Zone:</span><span id="cardFlapTime">-</span></div>
       </div>
 
-      <h2>Lifetime Fleet Averages</h2>
-      <div class="card-box" style="background:#181824;">
-        <div class="metric-row"><span>Total Tacks Logged:</span><span id="avgCount" class="metric-value">0</span></div>
-        <div class="metric-row"><span>Avg Meters Lost:</span><span id="avgLost" style="color:#f87171;">-</span></div>
-        <div class="metric-row"><span>Avg Recovery Time:</span><span id="avgRecTime">-</span></div>
-        <div class="metric-row"><span>Avg Speed Drop:</span><span id="avgMinStw">-</span></div>
+      <h2>Fleet Statistics</h2>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:12px;">
+        <div class="card-box" style="margin-bottom:0;">
+          <div style="color:#38bdf8; font-weight:bold; font-size:0.85rem; margin-bottom:4px;">Tacks</div>
+          <div class="metric-row"><span>Count:</span><span id="tackCount" class="metric-value">0</span></div>
+          <div class="metric-row"><span>Avg Lost:</span><span id="tackAvgLost" style="color:#f87171;">-</span></div>
+          <div class="metric-row"><span>Avg Recov:</span><span id="tackAvgRecTime">-</span></div>
+          <div class="metric-row"><span>Avg Drop:</span><span id="tackAvgDrop">-</span></div>
+        </div>
+        <div class="card-box" style="margin-bottom:0;">
+          <div style="color:#f472b6; font-weight:bold; font-size:0.85rem; margin-bottom:4px;">Gybes</div>
+          <div class="metric-row"><span>Count:</span><span id="gybeCount" class="metric-value">0</span></div>
+          <div class="metric-row"><span>Avg Lost:</span><span id="gybeAvgLost" style="color:#f87171;">-</span></div>
+          <div class="metric-row"><span>Avg Recov:</span><span id="gybeAvgRecTime">-</span></div>
+          <div class="metric-row"><span>Avg Drop:</span><span id="gybeAvgDrop">-</span></div>
+        </div>
       </div>
 
-      <h2>Top 10 Leaderboard (Fewest Lost)</h2>
-      <div class="card-box" style="max-height: 140px; overflow-y: auto;">
+      <h2>Top 10 — Tacks <span style="font-size:0.75rem; color:#64748b;">(fewest lost)</span></h2>
+      <div class="card-box" style="max-height:120px; overflow-y:auto;">
         <table class="rank-table">
           <thead><tr><th>#</th><th>Lost</th><th>Recov</th><th>Overturn</th></tr></thead>
-          <tbody id="leaderboardBody"><tr><td colspan="4" style="color:#475569; text-align:center;">No data logged yet</td></tr></tbody>
+          <tbody id="tackLeaderboard"><tr><td colspan="4" style="color:#475569; text-align:center;">No tacks logged</td></tr></tbody>
+        </table>
+      </div>
+
+      <h2>Top 10 — Gybes <span style="font-size:0.75rem; color:#64748b;">(fewest lost)</span></h2>
+      <div class="card-box" style="max-height:120px; overflow-y:auto;">
+        <table class="rank-table">
+          <thead><tr><th>#</th><th>Lost</th><th>Recov</th><th>Overturn</th></tr></thead>
+          <tbody id="gybeLeaderboard"><tr><td colspan="4" style="color:#475569; text-align:center;">No gybes logged</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -365,20 +383,33 @@
       if (p === 'performance.maneuver.database') {
         const db = v;
         if (db && typeof db === 'object') {
-          document.getElementById('avgCount').innerText = db.totalTacksLogged || 0;
-          document.getElementById('avgLost').innerText = (db.averages && db.averages.metersLost) ? (db.averages.metersLost + ' m') : '-';
-          document.getElementById('avgRecTime').innerText = (db.averages && db.averages.recoveryDurationSec) ? (db.averages.recoveryDurationSec + ' s') : '-';
-          document.getElementById('avgMinStw').innerText = (db.averages && db.averages.minStwKnots) ? (db.averages.minStwKnots + ' kn') : '-';
+          const fmtAvg = (avg, key, unit) => (avg && avg[key] != null) ? avg[key] + unit : '-';
 
-          let html = '';
-          (db.topTenBests || []).forEach((t, i) => {
-            let cls = i === 0 ? 'class="gold"' : '';
-            const lost = t.metersLost != null ? t.metersLost + 'm' : '-';
-            const rec = t.recoveryDurationSec != null ? t.recoveryDurationSec + 's' : '-';
-            const ov = t.maxOverturnTWA != null ? t.maxOverturnTWA + '°' : '-';
-            html += `<tr ${cls}><td>${i+1}</td><td>${lost}</td><td>${rec}</td><td>${ov}</td></tr>`;
-          });
-          document.getElementById('leaderboardBody').innerHTML = html || '<tr><td colspan="4">No data logged</td></tr>';
+          const tacks = db.tacks || {};
+          document.getElementById('tackCount').innerText = tacks.count || 0;
+          document.getElementById('tackAvgLost').innerText = fmtAvg(tacks.averages, 'metersLost', ' m');
+          document.getElementById('tackAvgRecTime').innerText = fmtAvg(tacks.averages, 'recoveryDurationSec', ' s');
+          document.getElementById('tackAvgDrop').innerText = fmtAvg(tacks.averages, 'minStwKnots', ' kn');
+
+          const gybes = db.gybes || {};
+          document.getElementById('gybeCount').innerText = gybes.count || 0;
+          document.getElementById('gybeAvgLost').innerText = fmtAvg(gybes.averages, 'metersLost', ' m');
+          document.getElementById('gybeAvgRecTime').innerText = fmtAvg(gybes.averages, 'recoveryDurationSec', ' s');
+          document.getElementById('gybeAvgDrop').innerText = fmtAvg(gybes.averages, 'minStwKnots', ' kn');
+
+          function renderLeaderboard(id, entries) {
+            let html = '';
+            (entries || []).forEach((t, i) => {
+              const cls = i === 0 ? 'class="gold"' : '';
+              const lost = t.metersLost != null ? t.metersLost + 'm' : '-';
+              const rec  = t.recoveryDurationSec != null ? t.recoveryDurationSec + 's' : '-';
+              const ov   = t.maxOverturnTWA != null ? t.maxOverturnTWA + '°' : '-';
+              html += `<tr ${cls}><td>${i+1}</td><td>${lost}</td><td>${rec}</td><td>${ov}</td></tr>`;
+            });
+            document.getElementById(id).innerHTML = html || '<tr><td colspan="4" style="color:#475569; text-align:center;">No data yet</td></tr>';
+          }
+          renderLeaderboard('tackLeaderboard', tacks.topTen);
+          renderLeaderboard('gybeLeaderboard', gybes.topTen);
         }
       }
     }
