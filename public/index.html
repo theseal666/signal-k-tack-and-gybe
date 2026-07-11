@@ -349,14 +349,16 @@
       if (p === 'performance.maneuver.lastSummary') {
         const s = v;
         if (s && typeof s === 'object') {
-          document.getElementById('cardLost').innerText = (s.metersLost || 0) + ' m';
-          const vmgLost = (s.theoreticalVmgDistanceMeters && s.actualVmgDistanceMeters) ? (s.theoreticalVmgDistanceMeters - s.actualVmgDistanceMeters).toFixed(2) : '-';
-          document.getElementById('cardVmgLost').innerText = (vmgLost === '-') ? '-' : vmgLost + ' m';
-          document.getElementById('cardRecTime').innerText = (s.recoveryDurationSec || '-') + ' s';
-          document.getElementById('cardStwMinMax').innerText = `${(s.minStwKnots||'-')} / ${(s.maxStwKnots||'-')} kn`;
-          document.getElementById('cardVmgStartMax').innerText = `${(s.actualVmgDistanceMeters||'-')} / ${(s.theoreticalVmgDistanceMeters||'-')} m`;
-          document.getElementById('cardOverturn').innerText = (s.maxOverturnTWA || '-') + '°';
-          document.getElementById('cardFlapTime').innerText = (s.timeInDeadZoneSec || '-') + ' s';
+          const fmt = (v, unit) => v != null ? v + unit : '-';
+          const fmtVmgLost = (s.theoreticalVmgDistanceMeters != null && s.actualVmgDistanceMeters != null)
+            ? (s.theoreticalVmgDistanceMeters - s.actualVmgDistanceMeters).toFixed(2) + ' m' : '-';
+          document.getElementById('cardLost').innerText = fmt(s.metersLost, ' m');
+          document.getElementById('cardVmgLost').innerText = fmtVmgLost;
+          document.getElementById('cardRecTime').innerText = fmt(s.recoveryDurationSec, ' s');
+          document.getElementById('cardStwMinMax').innerText = `${fmt(s.minStwKnots, '')} / ${fmt(s.maxStwKnots, '')} kn`;
+          document.getElementById('cardVmgStartMax').innerText = `${fmt(s.actualVmgDistanceMeters, '')} / ${fmt(s.theoreticalVmgDistanceMeters, '')} m`;
+          document.getElementById('cardOverturn').innerText = fmt(s.maxOverturnTWA, '°');
+          document.getElementById('cardFlapTime').innerText = fmt(s.timeInDeadZoneSec, ' s');
         }
       }
 
