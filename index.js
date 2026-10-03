@@ -11,7 +11,21 @@ module.exports = function (app) {
   plugin.name = 'Tack and Gybe Analyzer';
   plugin.description = 'Detects and measures tacks and gybes, tracking metres lost, recovery time, and a persistent Top-10 leaderboard.';
 
-  const BUFFER_SIZE = 50;
+  // Every duration in this plugin is measured against a MONOTONIC clock, not
+  // Date.now(). The boat's Pi has no RTC: it boots on a stale clock and NTP
+  // steps it once a fix arrives. On 2026-10-03 that step landed inside the
+  // first manoeuvre of the day and the summary recorded a recovery of
+  // 2,242,658 s — 25.95 days, exactly the size of the clock jump — along with
+  // a dead-zone time to match. Wall time is kept only for the ISO timestamp
+  // written into the log, where it is what the reader actually wants.
+  const monoNow = () => Number(process.hrtime.bigint() / 1000000n);
+
+  // No tack or gybe takes five minutes. Anything longer is a bug, not a manoeuvre.
+  const MAX_MANOEUVRE_SEC = 300;
+
+  // 150 ticks at 200 ms = 30 s, enough to reach back past the start of a turn
+  // when picking the pre-manoeuvre baseline (see the Pending -> InTurn block).
+  const BUFFER_SIZE = 150;
   let rollingHistory = [];
 
   let currentState = 'Straight';
@@ -42,7 +56,7 @@ module.exports = function (app) {
 
   let cfg = {};
 
-  let lastAnalysisTime = Date.now();
+  let lastAnalysisTime = monoNow();
   let lastDataTimestamp = 0;
 
   function defaultDatabase() {
@@ -240,9 +254,59 @@ module.exports = function (app) {
     lastDataTimestamp = now;
   }
 
+  // Pre-manoeuvre baseline, taken when the turn is CONFIRMED rather than when
+  // the rudder first moves.
+  //
+  // The old code snapshotted at Straight -> Pending. Pending is a cheap
+  // candidate state that cancels itself after 10 s, and on 2026-10-03 it fired
+  // 210 times for 10 real manoeuvres — rudder past 5 deg happens on 13% of
+  // normal upwind samples. Any of those still pending when a real turn began
+  // froze the baseline at a random mid-leg moment, so metersLost was measured
+  // against the wrong reference. (Raising the rudder threshold is NOT the fix:
+  // checked against the same log, 10 deg would have missed 4 of the 10 real
+  // manoeuvres, and one tack never exceeded 3.6 deg.)
+  //
+  // Instead the baseline is the median of the samples from BASELINE_FROM_MS to
+  // BASELINE_TO_MS before confirmation — settled water, before the turn, and a
+  // median so one outlier cannot set the reference.
+  const BASELINE_FROM_MS = 12000;
+  const BASELINE_TO_MS = 3000;
+  const median = (xs) => {
+    if (!xs.length) return null;
+    const v = xs.slice().sort((a, b) => a - b);
+    return v[Math.floor(v.length / 2)];
+  };
+
+  function beginManoeuvre(now) {
+    let pre = rollingHistory.filter(
+      (h) => now - h.ts >= BASELINE_TO_MS && now - h.ts <= BASELINE_FROM_MS
+    );
+    // Prefer samples where the helm was settled, if we have enough of them.
+    const settled = pre.filter((h) => (h.rud === undefined ? true : h.rud < 5));
+    if (settled.length >= 5) pre = settled;
+
+    if (pre.length >= 3) {
+      snapshotEntrySTW = median(pre.map((h) => h.stw));
+      snapshotEntryVMG = median(pre.map((h) => h.vmg));
+      snapshotEntryTWA = Math.abs(median(pre.map((h) => Math.abs(h.twa))));
+    } else {
+      const base = rollingHistory[0];
+      if (base) {
+        snapshotEntrySTW = base.stw;
+        snapshotEntryVMG = base.vmg;
+        snapshotEntryTWA = Math.abs(base.twa);
+      }
+    }
+    maxOverturnTWA = 0;
+    timeInDeadZone = 0;
+    metersLostAccum = 0;
+    actualDistanceMeters = 0; theoreticalDistanceMeters = 0;
+    actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0;
+  }
+
   // ── Analysis pipeline ───────────────────────────────────────────────────────
   function runAnalysis() {
-    const now = Date.now();
+    const now = monoNow();
     let dt = (now - lastAnalysisTime) / 1000.0;
     if (!Number.isFinite(dt) || dt <= 0) dt = 0.2;
     lastAnalysisTime = now;
@@ -275,6 +339,7 @@ module.exports = function (app) {
         stw: Number(stwKnots.toFixed(3)),
         vmg: Number(vmgKnots.toFixed(3)),
         twa: Number(twaDeg.toFixed(2)),
+        rud: Math.abs(rudderDeg),
         ts: now
       });
       if (rollingHistory.length > BUFFER_SIZE) rollingHistory.shift();
@@ -285,19 +350,9 @@ module.exports = function (app) {
     if (currentState === 'Straight') {
       const isUpwind = Math.abs(twaDeg) < 40;
       const isDownwind = Math.abs(twaDeg) > 110;
-      if (Math.abs(rudderDeg) > 5 && (isUpwind || isDownwind)) {
+      if (Math.abs(rudderDeg) > cfg.entryRudderDeg && (isUpwind || isDownwind)) {
         currentState = 'Pending';
         pendingStartTime = now;
-        // Most recent entry = true pre-manoeuvre state. [0] (oldest) could be from a previous leg.
-        const base = rollingHistory[rollingHistory.length - 1] || { stw: stwKnots, vmg: vmgKnots, twa: twaDeg };
-        snapshotEntrySTW = base.stw;
-        snapshotEntryVMG = base.vmg;
-        snapshotEntryTWA = Math.abs(base.twa);
-        maxOverturnTWA = 0;
-        timeInDeadZone = 0;
-        metersLostAccum = 0;
-        actualDistanceMeters = 0; theoreticalDistanceMeters = 0;
-        actualVmgDistanceMeters = 0; theoreticalVmgDistanceMeters = 0;
       }
     }
 
@@ -309,20 +364,16 @@ module.exports = function (app) {
         : (rollingHistory[0] || { twa: twaDeg });
       const signChange = (prev.twa < 0 && twaDeg > 0) || (prev.twa > 0 && twaDeg < 0);
 
-      if (signChange && Math.abs(twaDeg) < 20) {
+      const confirmTack = signChange && Math.abs(twaDeg) < 20;
+      const confirmGybe = signChange && Math.abs(twaDeg) > 150;
+      if (confirmTack || confirmGybe) {
         currentState = 'InTurn';
-        maneuverType = 'Tack';
+        maneuverType = confirmTack ? 'Tack' : 'Gybe';
         startTime = now;
         inTurnStartTime = now;
         minSTW = stwKnots; maxSTW = stwKnots;
         minVMG = vmgKnots; maxVMG = vmgKnots;
-      } else if (signChange && Math.abs(twaDeg) > 150) {
-        currentState = 'InTurn';
-        maneuverType = 'Gybe';
-        startTime = now;
-        inTurnStartTime = now;
-        minSTW = stwKnots; maxSTW = stwKnots;
-        minVMG = vmgKnots; maxVMG = vmgKnots;
+        beginManoeuvre(now);
       } else if (timeInPending > 10.0) {
         currentState = 'Straight'; // no committed crossing — cancel
       }
@@ -372,11 +423,20 @@ module.exports = function (app) {
           const metersLost = Number(
             Math.max(metersLostAccum, theoreticalDistanceMeters - actualDistanceMeters).toFixed(1)
           );
+          // Backstop. A manoeuvre lasting more than MAX_MANOEUVRE_SEC is not a
+          // manoeuvre; publishing it poisons the averages and the leaderboard.
+          const durationSec = Number(((now - startTime) / 1000.0).toFixed(1));
+          if (!Number.isFinite(durationSec) || durationSec < 0 || durationSec > MAX_MANOEUVRE_SEC) {
+            app.debug(`discarding ${maneuverType}: implausible duration ${durationSec} s`);
+            currentState = 'Straight';
+            maneuverType = 'Straight';
+            return;
+          }
           logManeuver({
             type: maneuverType,
             timestamp: new Date().toISOString(),
             metersLost,
-            recoveryDurationSec: Number(((now - startTime) / 1000.0).toFixed(1)),
+            recoveryDurationSec: durationSec,
             minStwKnots: Number(minSTW.toFixed(2)),
             maxStwKnots: Number(maxSTW.toFixed(2)),
             maxOverturnTWA: Number(maxOverturnTWA.toFixed(1)),
@@ -422,12 +482,13 @@ module.exports = function (app) {
       upwindTargetKnots: options.upwindTargetKnots || 7.5,
       downwindTargetKnots: options.downwindTargetKnots || 9.0,
       recoveryMultiplier: (options.recoveryThreshold || 95) / 100,
+      entryRudderDeg: options.entryRudderDeg || 5,
       simulate: options.simulate === true,
     };
 
     if (cfg.simulate) {
       simPhase = 'upwind-steady';
-      simPhaseStart = Date.now();
+      simPhaseStart = monoNow();
       app.setPluginStatus('SIMULATION mode — watch the dashboard for tacks and gybes');
     } else {
       app.setPluginStatus('Running — waiting for manoeuvres');
@@ -455,21 +516,21 @@ module.exports = function (app) {
                 if (v === null) return;
                 switch (kv.path) {
                   case 'navigation.speedThroughWater':
-                    currentSTW = v; lastDataTimestamp = Date.now(); break;
+                    currentSTW = v; lastDataTimestamp = monoNow(); break;
                   case 'environment.wind.angleTrueWater': {
                     const n = normalizeRadians(v);
-                    if (n !== null) { currentTWA = n; lastDataTimestamp = Date.now(); }
+                    if (n !== null) { currentTWA = n; lastDataTimestamp = monoNow(); }
                     break;
                   }
                   case 'environment.wind.angleApparent': {
                     const n = normalizeRadians(v);
-                    if (n !== null) { currentAWA = n; lastDataTimestamp = Date.now(); }
+                    if (n !== null) { currentAWA = n; lastDataTimestamp = monoNow(); }
                     break;
                   }
                   case 'steering.rudderAngle':
-                    currentRudder = v; lastDataTimestamp = Date.now(); break;
+                    currentRudder = v; lastDataTimestamp = monoNow(); break;
                   case 'environment.wind.speedTrue':
-                  currentTWS = v; lastDataTimestamp = Date.now(); break;
+                  currentTWS = v; lastDataTimestamp = monoNow(); break;
                 // COG is read by the dashboard directly via its own WS subscription
                 }
               });
@@ -482,7 +543,7 @@ module.exports = function (app) {
     }
 
     if (analysisInterval) clearInterval(analysisInterval);
-    lastAnalysisTime = Date.now();
+    lastAnalysisTime = monoNow();
     analysisInterval = setInterval(() => {
       try { runAnalysis(); } catch (e) { app.error('Analysis loop error: ' + e.message); }
     }, 200);
@@ -514,6 +575,12 @@ module.exports = function (app) {
         title: 'Downwind target boatspeed (knots)',
         description: 'Target STW for downwind sailing. Gybe recovery is complete when STW reaches this × recovery threshold.',
         default: 9.0
+      },
+      entryRudderDeg: {
+        type: 'number',
+        title: 'Manoeuvre candidate rudder angle (degrees)',
+        description: 'Rudder deflection that puts the detector into its Pending candidate state. Pending is cheap and cancels itself after 10 s, and the manoeuvre is only confirmed by a TWA sign change, so this is deliberately loose — measured against a real sail, raising it to 10 deg would have missed 4 of 10 genuine manoeuvres while one tack never exceeded 3.6 deg. Lower it only if the state channel is too noisy for you.',
+        default: 5
       },
       recoveryThreshold: {
         type: 'number',
