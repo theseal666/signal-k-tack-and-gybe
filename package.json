@@ -1,7 +1,7 @@
 {
   "name": "signalk-tack-and-gybe",
   "version": "0.2.0",
-  "description": "Detects and measures tacks and gybes — metres lost, recovery time, and a persistent Top-10 leaderboard.",
+  "description": "Detects and measures tacks and gybes \u2014 metres lost, recovery time, and a persistent Top-10 leaderboard.",
   "main": "index.js",
   "files": [
     "index.js",
@@ -9,7 +9,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "mocha test/*.js"
   },
   "engines": {
     "node": ">=18"
@@ -28,5 +28,9 @@
   "bugs": {
     "url": "https://github.com/theseal666/signal-k-tack-and-gybe/issues"
   },
-  "homepage": "https://github.com/theseal666/signal-k-tack-and-gybe#readme"
+  "homepage": "https://github.com/theseal666/signal-k-tack-and-gybe#readme",
+  "devDependencies": {
+    "mocha": "^10.0.0",
+    "chai": "^4.3.0"
+  }
 }

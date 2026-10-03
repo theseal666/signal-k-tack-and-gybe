@@ -1,4 +1,2 @@
 node_modules/
-.DS_Store
-tack-history.json
-npm-debug.log*
+package-lock.json
